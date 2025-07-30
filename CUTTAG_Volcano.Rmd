@@ -1,0 +1,100 @@
+---
+title: "Volcano_FOXA2_vs_NEUN"
+output: html_notebook
+---
+
+20250407 - Janis
+
+```{r}
+# Load required libraries
+library(ggplot2)
+library(viridis)
+
+deg_dir <- "/dir/DEG_FOXA2_vs_NEUN"
+
+setwd(deg_dir)
+
+input_file <- ("FOXA2_vs_NEUN_annotated")
+
+# Read annotated NEUN_vs_others file
+deg_file <- file.path(deg_dir, paste0(input_file, ".csv"))
+deg_df <- read.csv(deg_file)
+```
+
+### Plot Volcano Plot using EnhancedVolcano
+```{r}
+library(EnhancedVolcano)
+library(dplyr)
+
+color_palette <- c("#009E73", "#0072B2", "#785594")  # Adjust if needed
+
+#colors <- c("#785594", "#B8A5C5", "#009E73","#7CCAB5", "#0072B2", "#7CB4D4")
+
+keyvals <- ifelse(
+  deg_df$logFC < -1 & deg_df$FDR < 0.05,"#009E73" ,  
+  ifelse(deg_df$logFC > 1 & deg_df$FDR < 0.05,"#785594", 
+         'grey30')  # nonsig or not meeting FC
+)
+keyvals[is.na(keyvals)] <- 'grey30'
+
+# Optional: name them for use in legend
+names(keyvals)[keyvals == "#009E73"] <- 'Down'
+names(keyvals)[keyvals == "#785594"] <- 'Up'
+names(keyvals)[keyvals == 'grey30'] <- 'NS'
+
+peak_table <- deg_df %>%
+  dplyr::select(metadata.Geneid, SYMBOL, logFC, FDR) %>%
+  arrange(FDR)
+
+top_up_peaks <- peak_table %>%
+  filter(logFC > 1, FDR < 0.05) %>%
+  slice_head(n = 20)
+
+top_down_peaks <- peak_table %>%
+  filter(logFC < 1, FDR < 0.05) %>%
+  slice_head(n = 20)
+
+
+
+label_peaks <- bind_rows(top_up_peaks, top_down_peaks)
+
+# Then create a vector of symbols 
+deg_df$label_this <- ifelse(deg_df$metadata.Geneid %in% label_peaks$metadata.Geneid, deg_df$SYMBOL, NA)
+
+library(EnhancedVolcano)
+
+volcano_plot <- EnhancedVolcano(
+  deg_df,
+  lab = deg_df$label_this,
+  x = 'logFC',
+  y = 'FDR',
+  pCutoff = 0.05,
+  FCcutoff = 1,
+  pointSize = 2.0,
+  labSize = 3.5,
+  title = 'Volcano Plot: FOXA2 vs NEUN',
+  subtitle = 'Differentially acetylated peaks',
+  caption = 'Data from CUT&Tag analysis',
+  legendPosition = 'bottom',
+  colCustom = keyvals,
+  colAlpha = 0.8,
+  drawConnectors = TRUE,
+  widthConnectors = 0.2,
+  legendDropLevels = FALSE,
+  max.overlaps = 50,
+  xlim = c(min(deg_df[["logFC"]], na.rm = TRUE) - 1, max(deg_df[["logFC"]], na.rm = TRUE) +
+    1),
+  ylim = c(0, max(-log10(deg_df[["FDR"]]), na.rm = TRUE) + 1)
+)
+
+
+
+# Save plot
+pdf(file.path(deg_dir, "volcano_plot_FOXA2_vs_NEUN_top20.pdf"), width = 5, height = 8)
+print(volcano_plot)
+dev.off()
+
+print(volcano_plot)
+
+```
+

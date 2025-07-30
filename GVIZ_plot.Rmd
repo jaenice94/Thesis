@@ -1,0 +1,227 @@
+#plot browser traces
+
+#polygon colouring in GVIX is a bit of an issue - easiest to just recolor in AI
+```{r}
+library(Gviz)
+library(org.Hs.eg.db)
+library(TxDb.Hsapiens.UCSC.hg38.knownGene)
+library(GenomicInteractions)
+library(GenomicRanges)
+
+# Gene of interest
+geneSymbol <- "PINK1" #example gene
+
+# Get Entrez ID for gene symbol
+# Map gene symbol to Entrez ID
+entrezID <- AnnotationDbi::select(org.Hs.eg.db,
+                                  keys = geneSymbol,
+                                  columns = "ENTREZID",
+                                  keytype = "SYMBOL")$ENTREZID[1]
+
+# Get gene range from TxDb
+geneRange <- genes(TxDb.Hsapiens.UCSC.hg38.knownGene)[entrezID]
+
+
+# Extend a bit around the gene (optional)
+buffer <- 90000 #can be modified
+plotStart <- start(geneRange) - buffer
+plotEnd <- end(geneRange) + buffer
+plotChr <- as.character(seqnames(geneRange))
+
+axisTrack <- GenomeAxisTrack()
+ideoTrack <- IdeogramTrack(genome = "hg38", chromosome = plotChr)
+
+
+rTrack <- UcscTrack(genome="hg38", chromosome=plotChr, track = "NCBI RefSeq",  from=plotStart, to=plotEnd, trackType="GeneRegionTrack",  rstarts="exonStarts", rends="exonEnds", gene="name",  symbol="name2", transcript="name", strand="strand",  fill="darkblue",stacking="dense", name="RefSeq",  showId=TRUE, geneSymbol=TRUE)
+```
+
+```{r}
+
+# Step 1: Read in your BED-style Hi-C loop data
+loop_df <- read.delim("/HiC/iDOPA_hg38_merged_2Mb_longrange_loops_pcHiC.bed", header = TRUE)
+
+# Step 2: Subset to region of interest (plotChr, plotStart, plotEnd already defined above)
+loop_df_sub <- subset(loop_df,
+  chr1 == plotChr & chr2 == plotChr &
+  start1 >= plotStart & end1 <= plotEnd &
+  start2 >= plotStart & end2 <= plotEnd
+)
+
+# Step 3: Create GRanges for anchors
+anchor1 <- GRanges(
+  seqnames = loop_df_sub$chr1,
+  ranges = IRanges(start = loop_df_sub$start1, end = loop_df_sub$end1)
+)
+
+anchor2 <- GRanges(
+  seqnames = loop_df_sub$chr2,
+  ranges = IRanges(start = loop_df_sub$start2, end = loop_df_sub$end2)
+)
+
+# Step 4: Create GenomicInteractions object
+gi <- GenomicInteractions(anchor1, anchor2)
+mcols(gi)$fdr <- loop_df_sub$fdr
+
+# Step 5: Make Gviz InteractionTrack
+hicTrack <- InteractionTrack(
+gi,
+  chromosome = plotChr,
+  start=plotStart,
+  end=plotEnd,
+  name = "Hi-C Loops"
+)
+displayPars(hicTrack) <- list(
+  col.interactions = "#785594",     # color of arcs
+  col.anchors.fill = "#785594",     # fill color of anchor regions
+  col.anchors.line = "#785594"      # border color of anchor boxes
+)
+
+
+# Step 1: Read in your BED-style Hi-C loop data
+loop_df2 <- read.delim("/HiC/NH07_1047_OLIG2_pcHiC_hg38.cis_le_2Mb.longrange_ucsc.bed", header = TRUE, skip = 1)
+
+# Step 2: Subset to region of interest (plotChr, plotStart, plotEnd already defined above)
+loop_df_sub <- subset(loop_df2,
+  sourceChrom == plotChr & targetChrom == plotChr &
+  sourceStart >= plotStart & sourceEnd <= plotEnd &
+  targetStart >= plotStart & targetEnd <= plotEnd
+)
+
+
+# Step 3: Create GRanges for anchors
+anchor1 <- GRanges(
+  seqnames = loop_df_sub$sourceChrom,
+  ranges = IRanges(start = loop_df_sub$sourceStart, end = loop_df_sub$sourceEnd)
+)
+
+anchor2 <- GRanges(
+  seqnames = loop_df_sub$targetChrom,
+  ranges = IRanges(start = loop_df_sub$targetStart, end = loop_df_sub$targetEnd)
+)
+
+# Step 4: Create GenomicInteractions object
+gi <- GenomicInteractions(anchor1, anchor2)
+mcols(gi)$fdr <- loop_df_sub$value
+
+if (length(gi) == 0) {
+  message("No loops in region — using placeholder InteractionTrack.")
+  hicTrack_O <- AnnotationTrack(
+    GRanges(seqnames = plotChr, ranges = IRanges(start = plotStart, end = plotStart + 1)),
+    genome = "hg38",
+    name = "Hi-C Loops (None)",
+    shape = "none",  # doesn't draw anything
+    stacking = "hide"
+  )
+} else {
+  hicTrack_O <- InteractionTrack(
+    gi,
+    chromosome = plotChr,
+    start = plotStart,
+    end = plotEnd,
+    name = "Hi-C Loops"
+  )
+  displayPars(hicTrack_O) <- list(
+    col.interactions = "#0072B2",
+    col.anchors.fill = "#0072B2",
+    col.anchors.line = "#0072B2"
+  )
+}
+
+
+```
+
+```{r}
+
+OLIG2 <- DataTrack(range ="cuttag_dir/bigwigs/PDdopa_JLT_20250221_CT_hs_human_control_OLIG2_all.bw", type = "polygon", col.mountain="#0072B2", genome = "hg38", name = "OLIG2 H3K27ac",aggregate = mean,
+  ylim = c(0, 3))
+OLIG2_bed <- AnnotationTrack("cuttag_dir/peak_calling/OLIG2_confidence_peaks.sorted.bed", genome = "hg38", fill="#0072B2", col = NA, shape = "box", name = "OLIG2 H3K27ac peaks")
+
+FOXA2 <- DataTrack(range ="cuttag_dir/bigwigs/PDdopa_JLT_20250221_CT_hs_human_control_FOXA2_all.bw", type = "polygon", col.mountain="#785594", genome = "hg38", name = "FOXA2 H3K27ac",
+  ylim = c(0, 3))
+FOXA2_bed <- AnnotationTrack("cuttag_dir/peak_calling/FOXA2_confidence_peaks.sorted.bed", genome = "hg38", fill="#785594", col=NA, shape = "box", name = "FOXA2 H3K27ac peaks")
+
+ipsc_ac <- DataTrack(range ="cuttag_dir_iDA/bigwigs/PDdopa_JLT_20240822_iCell_H3k27ac_iPSC_DaN_iCell_DOPA_D14_all.bw", type = "polygon", col.mountain="#785594", genome = "hg38", name = "ipsc H3K27ac",
+  ylim = c(0, 3))
+ipsc_ac_bed <- AnnotationTrack("cuttag_dir_iDA/peak_calling/iCell_DOPA_D14_confidence_peaks.sorted.bed", genome = "hg38", fill="#785594", col=NA, shape = "box", name = "ipsc H3K27ac peaks")
+
+ipsc_me3 <- DataTrack(range ="cuttag_dir_iDA_H3K4me3/bigwigs/PDdopa_JLT_20250305_CT_TFs_iPSC_DaN_H3K4me3_iCell_DOPA_D14_all.bw", type = "polygon", col.mountain="#785594", genome = "hg38", name = "ipsc H3K27ac",
+  ylim = c(0, 10))
+ipsc_me3_bed <- AnnotationTrack("cuttag_dir_iDA_H3K4me3/peak_calling/iCell_DOPA_D14_confidence_peaks.sorted.bed", genome = "hg38", fill="#785594", col=NA, shape = "box", name = "ipsc H3K27ac peaks")
+
+
+ipsc_atac <- DataTrack(range ="atac_dir_iDA/bigwigs/PDdopa_JLT_2025_01_03_ATAC_iCell_2_iPSC_neurons_iCell_DOPA_all.bw", type = "polygon", col.mountain="#785594", genome = "hg38", name = "ipsc atac",
+  ylim = c(0, 20))
+ipsc_atac_bed <- AnnotationTrack("atac_dir_iDA/peak_calling/iCell_DOPA_confidence_peaks.sorted.bed", genome = "hg38", fill="#785594", col=NA, shape = "box", name = "ipsc atac peaks")
+
+
+col <- "#009E73"
+NEUN <- DataTrack(range ="cuttag_dir/bigwigs/PDdopa_JLT_20250221_CT_hs_human_control_NEUN_all.bw", type = "polygon", col.mountain="#009E73", genome = "hg38", name = "NEUN H3K27ac", fill.mountain = "#009E73",
+  ylim = c(0, 3))
+NEUN_bed <- AnnotationTrack("cuttag_dir/peak_calling/NEUN_confidence_peaks.sorted.bed", genome = "hg38", fill="#009E73", col = NA, shape = "box", name = "NEUN H3K27ac peaks")
+CT_colors <- c("NEUN" = "#009E73", "FOXA2" = "#785594", "OLIG2" = "#0072B2")
+```
+
+
+```{r}
+# Load GWAS
+gwas <- read.table("/GWAS/GP2_03.2025/GP2_euro_ancestry_meta_analysis_2024/MungeSumStats/GP2_ALL_EUR_ALL_DATASET_HG38_12162024.mungesumstats.txt.gz", header = TRUE)
+colnames(gwas)
+
+```
+
+```{r}
+
+snp_oi <- c("rs61778528", "rs951805", "rs10916813", "rs12075716" )
+
+gwas_snps_oi <- gwas %>%
+  filter(SNP %in% snp_oi)
+
+# Convert p-values to -log10(p)
+gwas_snps_oi$logp <- -log10(gwas_snps_oi$P)
+
+# Create GRanges object for points
+gr_snps <- GRanges(
+  seqnames = gwas_snps_oi$CHR,
+  ranges = IRanges(start = gwas_snps_oi$BP, end = gwas_snps_oi$BP),
+  snp = gwas_snps_oi$SNP,
+  score = gwas_snps_oi$logp
+)
+
+gwasTrack <- DataTrack(
+  range = gr_snps,
+  genome = "hg38",
+  chromosome = plotChr,
+  type = "p",                  # 'p' = points
+  name = "-log10(p-value)",    # or "GWAS"
+  col = "black",
+  pch = 20,                    # dot symbol
+  cex = 0.2,                   # dot size 
+  from = plotStart,
+  to = plotEnd,
+  ylim = c(0, 10)
+)
+```
+
+```{r}
+
+stacking(rTrack) <-  "dense"
+
+pdf("PINK1_region_rs_genes_dense.pdf", height = 5, width = 9)
+plotTracks(list(ideoTrack, axisTrack, rTrack, gwasTrack, NEUN, NEUN_bed, OLIG2, OLIG2_bed, hicTrack_O, FOXA2, FOXA2_bed, ipsc_ac, ipsc_ac_bed, ipsc_me3, ipsc_me3_bed, ipsc_atac, ipsc_atac_bed, ipsc_foxa, ipsc_foxa_bed, hicTrack), from = plotStart,
+  to = plotEnd,
+  chromosome = plotChr, sizes = c(1,2,0.5,1,2,0.5,2,0.5,2,2,0.5,2,0.5, 2,0.5, 2,0.5, 2))
+
+dev.off()
+
+# Remove the custom drawGD method
+stacking(rTrack) <-  "squish"
+pdf("PINK1_region_rs_genes_squish.pdf", height = 5, width = 9)
+plotTracks(list(ideoTrack, axisTrack, rTrack, gwasTrack, FOXA2, FOXA2_bed,  hicTrack), from = plotStart,
+  to = plotEnd,
+  chromosome = plotChr, sizes = c(1,2,5,1,2,0.5,2))
+
+dev.off()
+
+```
+
+

@@ -1,0 +1,89 @@
+---
+title: "H-MAGMA"
+output: html_notebook
+---
+
+All H3K27ac per cell-type + loops - using RegulatoryRegion setting in H-MAGMA 
+
+SETUP
+```{r}
+
+setwd("H-magma_dir")
+
+library(hmagmaR)
+library(GenomicRanges)
+library(ChIPseeker)
+library(TxDb.Hsapiens.UCSC.hg19.knownGene)
+library(org.Hs.eg.db)
+
+snps <- read.csv("/magma/required_files/g1000_snps.txt", sep = ",", header = TRUE)  #hg19
+
+annotated_genes <- read.delim("/magma/required_files/annotated_genes_TxDb.Hsapiens.UCSC.hg19.knownGene.org.Hs.eg.db.txt") #hg19
+
+snpgeneexon <- read.delim("/magma/required_files/exonic_promoter_snps_chipSeeker.txt")  #hg19
+
+```
+
+h3k27ac - same file as for LDSC analysis
+```{r}
+hic <- read.delim("/HiC/iDOPA_wk14_hg19_merged_2Mb_longrange_loops_pcHiC.bed", header = TRUE)  #hg19
+
+hic <- hic[1:6]
+
+h3k27ac <- read.table("/ldsc/bed_files/24.04.2025_all_cell_types/FOXA2_final_human_peaks_noXYrandom.hg38tohg19.sorted.bed")  #hg19
+
+regulatoryRegions <- h3k27ac[1:3]
+
+fileName <- "Annotations_SNPs_iCell_Loops_All_FOXA2_H3K27ac"
+
+AnnotationFile.path <- "H-magma_dir"
+
+AnnotationFile <- "Annotations_SNPs_iCell_Loops_All_FOXA2_H3K27ac"
+
+hmagmaR::AnnotationFileHmagma(hic = hic, 
+                              regulatoryRegions = regulatoryRegions,
+                               snps = snps, 
+                               annotated_genes = annotated_genes,
+                               snpgeneexon = snpgeneexon, 
+                               AnnotationFile = fileName)
+```
+Using MAGMA to get gene-level stats 
+```{r}
+magma <- "~/software/magma/magma"
+g1000 <- "/home/software/magma/Ref_data/g1000_eur"
+
+N="1827641"
+
+gwas <- "/HiC/H-Magma/PD_GP2_2025_organised.loc"
+
+AnnotationFile <- "Annotations_SNPs_iCell_Loops_All_FOXA2_H3K27ac.transcript.annot"
+
+output <- "PD_GP2_2025_Annotations_SNPs_iCell_Loops_All_FOXA2_H3K27ac"
+
+#in GP2 study no N column available - using total N of all the samples - for this redefining the function 
+GeneLevelAnalysis_hmagma <- function(magma, g1000, gwas, AnnotationFile, output) {
+    system(paste(magma, "--bfile", g1000, "--pval", gwas, "use=SNP,P N=1827641", "--gene-annot", AnnotationFile, "--out", output))
+}
+
+GeneLevelAnalysis_hmagma(magma = magma, g1000 = g1000, gwas = gwas, AnnotationFile = AnnotationFile, output = output)
+```
+
+Retrieving the gene symbols and plotting them 
+```{r}
+genes <-  read.table("PD_GP2_2025_Annotations_SNPs_iCell_Loops_All_FOXA2_H3K27ac.genes.out", header = TRUE)
+
+ensembl_to_genes <- read.delim("/magma/required_files/annotated_genes_TxDb.Hsapiens.UCSC.hg19.knownGene.names.org.Hs.eg.db.txt") #hg19
+
+# Merge the two tables based on the 'ENSEMBL' column
+genes_with_symbol <- merge(genes, ensembl_to_genes[, c("ENSEMBL", "SYMBOL")], by.x = "GENE", by.y = "ENSEMBL", all.x = TRUE)
+
+# Calculate adjusted p-values using the Benjamini-Hochberg (FDR) method
+genes_with_symbol$P_adjust <- p.adjust(genes_with_symbol$P, method = "BH")
+
+# Filter for genes with adjusted p-value < 0.05
+PD_risk_genes <- subset(genes_with_symbol, P_adjust < 0.05)
+
+# Save the filtered table as a new file
+write.table(PD_risk_genes, file = "PD_GP2_2025_Annotations_SNPs_iCell_Loops_All_FOXA2_H3K27ac_0.05_padj_filtered.txt", sep = "\t", row.names = FALSE, quote = FALSE)
+
+```

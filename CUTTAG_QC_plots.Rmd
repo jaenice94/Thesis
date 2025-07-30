@@ -1,0 +1,445 @@
+
+
+```{r}
+# Load necessary libraries
+library(tidyverse)
+library(stringr)
+
+# Set working directory (modify if needed)
+setwd("dir")
+
+# Define the directory containing .flagstat files
+flagstat_folder <- "nextflow/02_alignment/bowtie2/target/markdup/"
+
+# Get all .flagstat files
+flagstat_files <- list.files(flagstat_folder, pattern = "*.flagstat", full.names = TRUE, recursive = TRUE)
+
+library(ggplot2)
+
+# Function to extract values from a flagstat file
+extract_reads <- function(file) {
+  
+  lines <- readLines(file)
+  
+  # Extract mapped reads
+  mapped_reads <- as.numeric(gsub(" .*", "", grep("mapped \\(", lines, value = TRUE)))
+  
+  unique_reads_before_1st_dedup <- mapped_reads/2
+  
+  # Extract duplicate reads
+  duplicate_reads <- as.numeric(gsub(" .*", "", grep("duplicates", lines, value = TRUE)))
+  
+  # Compute unique reads after first duplication
+  unique_reads <- (mapped_reads - duplicate_reads) / 2
+  
+  # Extract patient ID
+  patient_id <- str_extract(file, "(PDC\\d{3,}|C\\d{3,})")
+
+  # Extract cell type
+  cell_type <- str_extract(file, "FOXA2|NEUN|OLIG2")
+
+  # Construct sample name
+  sample_name <- ifelse(!is.na(patient_id) & !is.na(cell_type), paste0(patient_id, "_", cell_type), "UNKNOWN")
+  
+  return(data.frame(
+    Full_Sample = basename(file),
+    Sample = sample_name,
+    Patient_ID = patient_id,
+    Cell_Type = cell_type,
+    Total_reads_before_1st_dedup = unique_reads_before_1st_dedup,
+    Mapped_Reads = mapped_reads,
+    Duplicate_Reads = duplicate_reads,
+    Unique_Reads = unique_reads
+  ))
+}
+
+
+# Process all files
+read_stats <- unique(do.call(rbind, lapply(flagstat_files, extract_reads)))
+
+read_stats_filtered <- subset(read_stats, !Patient_ID %in% c( "IDs_to_remove"))
+```
+
+#Read counts before and after second (linear) deduplication
+```{r}
+library(tidyverse)
+library(stringr)
+
+# Define the directory to search
+metric_folder_path <- "nextflow/02_alignment/bowtie2/target/linear_dedup/"
+
+# Get all .flagstat files
+metric_files <- list.files(metric_folder_path, pattern = "*.linear_dedup_metrics.txt", full.names = TRUE, recursive = TRUE)
+
+# Process each file
+extract_reads_metric <- function(file) {
+
+  raw_data  <- readLines(file)
+
+
+  # Find the section with "LINEAR AMPLIFICATION DUPLICATION METRICS"
+  metrics_start <- grep("LINEAR AMPLIFICATION DUPLICATION METRICS", raw_data)
+
+  if (length(metrics_start) == 0) next  # Skip if section is missing
+
+  # Extract metric values
+  reads_before <- as.numeric(str_extract(raw_data[metrics_start + 1], "\\d+"))
+  duplicates_removed <- as.numeric(str_extract(raw_data[metrics_start + 2], "\\d+"))
+  unique_reads_after <- as.numeric(str_extract(raw_data[metrics_start + 4], "\\d+"))
+
+  # Extract patient ID
+  patient_id <- str_extract(file, "(PDC\\d{3,}|C\\d{3,})")
+
+  # Extract cell type
+  cell_type <- str_extract(file, "FOXA2|NEUN|OLIG2")
+
+  # Construct sample name
+  sample_name <- ifelse(!is.na(patient_id) & !is.na(cell_type), paste0(patient_id, "_", cell_type), "UNKNOWN")
+
+  # Debugging
+  print(paste("Extracted:", sample_name, patient_id, cell_type))
+
+  return(data.frame(
+    Full_sample_name = basename(file),
+    Sample = sample_name,
+    Patient_ID = patient_id,
+    Cell_Type = cell_type,
+    Total_reads_before_LA_dedup = reads_before,
+    Unique_Reads_after_LA_dedup = reads_before - duplicates_removed
+  ) %>%
+    group_by(Full_sample_name, Sample, Patient_ID, Cell_Type) %>%
+    summarize(
+      Total_reads_before_LA_dedup = sum(Total_reads_before_LA_dedup, na.rm = TRUE),
+      Unique_Reads_after_LA_dedup = sum(Unique_Reads_after_LA_dedup, na.rm = TRUE),
+      .groups = "drop"
+    ))
+}
+
+reads2 <- unique(do.call(rbind, lapply(metric_files, extract_reads_metric)))
+
+reads2_filtered <- subset(reads2, !Patient_ID %in% c("IDs_to_remove"))
+
+# Print final results
+print(reads2)
+
+```
+
+
+```{r}
+library(dplyr)
+
+# Merge datasets on Sample
+merged_reads <- read_stats_filtered %>%
+  dplyr::select(Sample, Total_reads_before_1st_dedup) %>%
+  inner_join(reads2_filtered, by = "Sample")
+
+```
+
+
+```{r}
+
+plot_data <- merged_reads %>%
+  pivot_longer(cols = c(Total_reads_before_1st_dedup, Total_reads_before_LA_dedup, Unique_Reads_after_LA_dedup), names_to = "Read_Type", values_to = "Read_Count")
+
+library(ggplot2)
+library(scales)
+
+# Ensure Read_Type is a factor with desired plotting order
+plot_data$Read_Type <- factor(plot_data$Read_Type, levels = c(
+  "Total_reads_before_1st_dedup",
+  "Total_reads_before_LA_dedup",
+  "Unique_Reads_after_LA_dedup"
+))
+
+# Set nicer names for display
+plot_data$Read_Type <- recode(plot_data$Read_Type,
+  "Total_reads_before_1st_dedup" = "Before 1st Dedup",
+  "Total_reads_before_LA_dedup" = "Before LA Dedup",
+  "Unique_Reads_after_LA_dedup" = "After LA Dedup"
+)
+
+# Define color scheme
+fill_colors <- c(
+  "Before 1st Dedup" = "grey80",
+  "Before LA Dedup" = "#A2C579",
+  "After LA Dedup" = "#9370DB"
+)
+
+pdf("ReadCounts_CUTTag.pdf", width = 6, height = 8)
+
+ggp <- ggplot(plot_data, aes(x = Sample, y = Read_Count, fill = Read_Type, color = Read_Type)) +
+  stat_summary(fun = mean, geom = "bar", position = position_dodge(width = 0.7), 
+               width = 0.6, linewidth = 0.3) +
+  coord_flip() +
+  scale_y_continuous(
+  labels = scales::label_number(scale = 1e-6, suffix = "M", accuracy = 0.1),
+  expand = expansion(mult = c(0, 0.05)))+
+  scale_fill_manual(values = fill_colors) +
+  scale_color_manual(values = rep("black", 3)) +
+  labs(
+    title = "Read Counts Across CUT&Tag Deduplication Stages",
+    x = "Sample",
+    y = "Read Count",
+    fill = "Read Type",
+    color = "Read Type"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    axis.text.y = element_text(size = 10),
+    legend.position = "right",
+    panel.grid.major.y = element_blank(),
+    panel.grid.minor = element_blank()
+  )
+
+print(ggp)
+dev.off()
+
+
+
+```
+
+---
+title: "QC_FRIPS"
+output: html_notebook
+---
+
+
+
+
+Read counts
+```{r}
+
+library(ggplot2)
+library(dplyr)
+library(stringr)
+library(readr)
+
+frip_data_cutntag <- read.delim("dir/frip_scores.txt", header = TRUE, stringsAsFactors = FALSE) %>%
+  mutate(Method = "CUT&Tag")
+
+# Extract sample names and categorize merged vs. individual samples
+frip_data_cutntag <- frip_data_cutntag %>%
+  mutate(
+    Sample = case_when(
+      grepl("^JLT|^JVD", Cell) ~ str_extract(Cell, "PDC\\d+_(NEUN|FOXA2|OLIG2)|C\\d+_(NEUN|FOXA2|OLIG2)"),  # Extract sample ID from long names
+      Cell %in% c("FOXA2", "NEUN", "OLIG2") ~ paste0("CUT&Tag_merged_", Cell),  # Rename merged samples
+      TRUE ~ Cell  # Keep any other cases as-is
+    ),
+    Cell_Type = case_when(
+      grepl("NEUN", Sample) ~ "NEUN",
+      grepl("FOXA2", Sample) ~ "FOXA2",
+      grepl("OLIG2", Sample) ~ "OLIG2",
+      TRUE ~ "Unknown"
+    )
+  )
+
+# Merge the two datasets
+frip_combined_data <- frip_data_cutntag
+
+
+# Convert FRiP_Score_MACS2 to numeric (removing '%')
+frip_combined_data$FRiP_Score_MACS2 <- as.numeric(str_replace(frip_combined_data$FRiP_Score_MACS2, "%", ""))
+
+frip_combined_data_filtered <- subset(frip_combined_data, !Sample %in% c("IDs_to_remove_NEUN", "IDs_to_remove_OLIG2"))
+
+frip_combined_data <- frip_combined_data_filtered
+```
+
+```{r}
+# **🔹 Explicitly set the factor order for Sample (fixes order issue in ggplot)**
+frip_combined_data$Sample <- factor(frip_combined_data$Sample, levels = unique(frip_combined_data$Sample))
+
+# Define color scheme for cell types
+cell_type_colors <- c("NEUN" = "#009E73", "FOXA2" = "#785594", "OLIG2" = "#0072B2")
+
+
+# 🔹 Assay label position data
+max_y <- max(frip_combined_data$FRiP_Score_MACS2, na.rm = TRUE)
+
+
+
+# 🔹 Create the final plot
+pdf("FRiP_Scores_CT.pdf", width = 6, height = 5)
+
+ggplot(frip_combined_data, aes(x = Sample, y = FRiP_Score_MACS2, fill = Cell_Type)) +
+  geom_bar(stat = "identity", width = 0.5, color = "black", linewidth = 0.2) +
+  scale_fill_manual(values = cell_type_colors) +
+  coord_flip() +  # Flip for readability
+  scale_y_continuous(limits = c(0, max_y * 1.15), labels = label_number(suffix = "%")) +
+  labs(
+    title = "FRiP Scores Across Samples",
+    x = "Sample",
+    y = "FRiP Score (%)",
+    fill = "Cell Type"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    legend.position = "right",
+    axis.text.y = element_text(size = 10),
+    panel.grid.major.y = element_blank()
+  ) 
+
+dev.off()
+```
+
+
+```{r}
+
+# Set working directory (change this to your bed file directory)
+bed_folder <- "dir/peak_calling/"
+
+# List all BED files in the directory
+bed_files <- list.files(bed_folder, pattern = "\\confidence_peaks.bed$", full.names = TRUE)
+
+# Initialize an empty list to store peak data
+peak_data_list <- list()
+
+# Function to read and process BED files
+process_bed <- function(file_path) {
+  # Read BED file (assuming standard format: chrom, start, end, etc.)
+  bed_df <- read_tsv(file_path, col_names = FALSE, comment = "#", col_types = cols(.default = "c"))
+
+  # Ensure correct format
+  if (ncol(bed_df) < 3) return(NULL)  # Skip files with incorrect format
+
+  # Convert start and end columns to numeric
+  bed_df <- bed_df %>%
+    mutate(
+      Start = as.numeric(X2),
+      End = as.numeric(X3),
+      Peak_Width = End - Start,
+      Peak_number = as.character(X4),
+      Sample = tools::file_path_sans_ext(basename(file_path))  # Extract sample name from filename
+    )
+
+  # Return dataframe
+  return(data.frame(Sample = bed_df$Sample[1], Peak_Width = bed_df$Peak_Width, Peak_number = bed_df$Peak_number ))
+}
+
+# Process all BED files
+for (file in bed_files) {
+  peak_data <- process_bed(file)
+  if (!is.null(peak_data)) {
+    peak_data_list[[file]] <- peak_data
+  }
+}
+
+peak_data_combined <- bind_rows(peak_data_list)
+
+peak_summary <- peak_data_combined %>%
+  group_by(Sample) %>%
+  summarize(Total_Peaks = n())  # Count entries for each Sample
+
+peak_summary <- peak_summary %>%
+  filter(!grepl("merged", Sample, ignore.case = TRUE))
+
+cuttag_summary <- peak_summary %>%
+mutate(Method = "CUT&Tag") 
+
+```
+
+```{r}
+
+# **Remove "merged" entries from peak_data_combined**
+peak_data_filtered <- peak_data_combined %>%
+  filter(!grepl("merged", Sample, ignore.case = TRUE)) %>%
+  mutate(log10_Peak_Width = log10(Peak_Width))  # Apply log10 transformation
+
+cuttag_peak_data <- peak_data_filtered %>%
+mutate(Method = "CUT&Tag") 
+```
+
+```{r}
+library(dplyr)
+
+# Merge the two datasets
+combined_data_summary <- bind_rows(cuttag_summary) #cuttag_summary, 
+
+combined_data_summary$Sample_label <- paste0(combined_data_summary$Sample, "_", combined_data_summary$Method)
+
+combined_data_summary$Sample_label <- factor(combined_data_summary$Sample_label, levels = combined_data_summary$Sample_label)
+
+combined_data_summary$Cell_type <- ifelse(grepl("FOXA2", combined_data_summary$Sample), "FOXA2",
+              ifelse(grepl("NEUN|NeuN", combined_data_summary$Sample), "NEUN",
+              ifelse(grepl("OLIG|OLIG2", combined_data_summary$Sample), "OLIG2", "Other")))
+
+cell_type_colors <- c("NEUN" = "#009E73", "FOXA2" = "#785594", "OLIG2" = "#0072B2")
+
+pdf("Peak_numbers_CT.pdf", width = 6, height =2)
+
+ggplot(combined_data_summary, aes(x = Sample_label, y = Total_Peaks, fill = Cell_type)) +
+  geom_bar(stat = "identity", width = 0.6, color = "black", linewidth = 0.2) +
+  coord_flip() +
+  scale_fill_manual(values = cell_type_colors) +
+  scale_y_continuous(labels = scales::scientific)+
+  labs(
+    title = "Total Number of Peaks per Sample",
+    x = "Sample",
+    y = "Peak Count",
+    fill = "Cell Type"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    axis.text.y = element_text(size = 10),
+    legend.position = "right",
+    panel.grid.major.y = element_blank()
+  ) 
+dev.off()
+
+```
+
+```{r}
+
+
+# Merge the two datasets
+combined_data_peak_width <- bind_rows(cuttag_peak_data)
+
+combined_data_peak_width$Sample_label <- paste0(combined_data_peak_width$Sample, "_", combined_data_peak_width$Method)
+
+sample_order <- combined_data_peak_width %>%
+  dplyr::select(Sample_label, Method) %>%
+  distinct() %>%
+  arrange(Method) %>%
+  pull(Sample_label)  # Extract the ordered Sample_labels
+
+# Convert Sample_label to a factor with the new order
+combined_data_peak_width$Sample_label <- factor(
+  combined_data_peak_width$Sample_label, 
+  levels = sample_order
+)
+
+combined_data_peak_width$Cell_type <- ifelse(grepl("FOXA2", combined_data_peak_width$Sample), "FOXA2",
+              ifelse(grepl("NEUN|NeuN", combined_data_peak_width$Sample), "NEUN",
+              ifelse(grepl("OLIG", combined_data_peak_width$Sample), "OLIG2", "Other")))
+
+cell_type_colors <- c("NEUN" = "#009E73", "FOXA2" = "#785594", "OLIG2" = "#0072B2")
+
+assay_positions <- combined_data_peak_width %>%
+  group_by(Method) %>%
+  summarize(
+    x_start = first(Sample_label),  # First sample in the actual ggplot order
+    x_end = last(Sample_label),      # Last sample in the actual ggplot order
+    y_pos = max(combined_data_peak_width$log10_Peak_Width) * 1.1  # Place above bars
+  )
+
+```
+
+```{r}
+# Define output PDF file
+pdf("Peak_Width_BoxPlot_log10_CT.pdf", width = 6, height =2)
+
+ggplot(combined_data_peak_width, aes(x = Sample_label, y = log10_Peak_Width, fill = Cell_type)) +
+  geom_boxplot() +
+  labs(title = "Log10 Peak Width Distribution by Sample",
+       x = "Sample",
+       y = "log10(Peak Width) (bp)") +
+  theme_minimal() +
+  scale_fill_manual(values = cell_type_colors) +
+  coord_flip()+
+  theme(axis.text.x = element_text( hjust = 1))  # Rotate x-axis labels
+
+# Save and close the PDF
+dev.off()
+
+```
+

@@ -1,0 +1,126 @@
+---
+title: "Pseudomanhatten H-MAGMA risk genes"
+output: html_notebook
+---
+
+```{r}
+
+setwd("H-magma_dir")
+
+# Updated Script 1: MAGMA Manhattan Plot with Genome-Consistent Spacing
+
+library(dplyr)
+library(ggplot2)
+library(ggrepel)
+library(GenomicRanges)
+library(BSgenome.Hsapiens.UCSC.hg19)  # Use hg19 if MAGMA uses hg19
+
+# Load MAGMA gene results
+genes <- read.table("../All_peaks_FOXA2_H3K27ac_iCell_Dopa_loops/PD_GP2_2025_Annotations_SNPs_iCell_Loops_All_FOXA2_H3K27ac.genes.out", header = TRUE)
+
+# Load Ensembl-to-symbol mapping
+ensembl_to_genes <- read.delim("/magma/required_files/annotated_genes_TxDb.Hsapiens.UCSC.hg19.knownGene.names.org.Hs.eg.db.txt")
+
+# Merge gene names
+genes_with_symbol <- merge(genes, ensembl_to_genes[, c("ENSEMBL", "SYMBOL")],
+                           by.x = "GENE", by.y = "ENSEMBL", all.x = TRUE)
+
+# Remove chrX and chrY, convert CHR to numeric
+genes_with_symbol <- genes_with_symbol %>%
+  filter(!is.na(CHR), CHR != "X", CHR != "Y") %>%
+  mutate(CHR = as.numeric(CHR)) %>%
+  arrange(CHR, START)
+
+# Adjust FDR
+genes_with_symbol$FDR <- p.adjust(genes_with_symbol$P, method = "BH")
+genes_with_symbol$significant <- genes_with_symbol$FDR < 0.001
+
+# Create GRanges
+gr_genes <- GRanges(
+  seqnames = genes_with_symbol$CHR,
+  ranges = IRanges(start = genes_with_symbol$START, end = genes_with_symbol$END),
+  gene_id = genes_with_symbol$SYMBOL,
+  zstat = genes_with_symbol$ZSTAT,
+  pval = genes_with_symbol$P
+)
+
+gr_df <- as.data.frame(gr_genes)
+gr_df$CHR <- as.numeric(as.character(gr_df$seqnames))
+gr_df <- gr_df[order(gr_df$CHR, gr_df$start), ]
+
+# Get chromosome lengths from BSgenome
+genome_lengths <- seqlengths(BSgenome.Hsapiens.UCSC.hg19)
+genome_lengths <- genome_lengths[names(genome_lengths) %in% paste0("chr", 1:22)]
+
+chr_lengths_df <- data.frame(
+  CHR = 1:22,
+  chr_len = as.numeric(genome_lengths[paste0("chr", 1:22)])
+) %>%
+  arrange(CHR) %>%
+  mutate(offset = c(0, cumsum(chr_len)[-length(chr_len)]))
+
+# Join offsets and calculate bp_cum
+gr_df <- gr_df %>%
+  left_join(chr_lengths_df, by = "CHR") %>%
+  mutate(bp_cum = start + offset)
+
+# Mark significance and group
+z_thresh <- qnorm(1 - 0.05 / 2)
+
+gr_df$FDR <- p.adjust(gr_df$pval, method = "BH")
+gr_df$significant <- gr_df$FDR < 0.001
+gr_df$CHR_GROUP <- factor(gr_df$CHR %% 2)
+
+# Axis labels
+axis_df <- chr_lengths_df %>%
+  mutate(center = offset + chr_len / 2)
+
+# Subset for labeling
+top_sig_genes <- gr_df %>%
+  filter(significant & abs(zstat) > 2)
+
+
+# Step 1: Load FOXA2-unique gene list
+foxa2_unique <- read.csv("specific_genes/FOXA2_unique_0.001_iCell.csv")
+
+# Step 2: Mark unique genes in gr_df (SYMBOL match)
+gr_df$unique_gene <- gr_df$gene_id %in% ensembl_to_genes$SYMBOL[ensembl_to_genes$ENSEMBL %in% foxa2_unique$GENE]
+
+# Step 3: Prioritize unique significant genes for labeling
+top_sig_genes <- gr_df %>%
+  filter(significant & abs(zstat) > 2)
+
+# Split labels into unique and others
+top_unique <- top_sig_genes %>% filter(unique_gene)
+top_other <- top_sig_genes %>% filter(!unique_gene)
+
+# Step 4: Plot with prioritized labeling
+pdf("PD_GP2_2025_HMAGMA_pseudomanhatten_FOXA2_0.001FDR.pdf", width = 10, height = 4)
+
+ggplot(gr_df, aes(x = bp_cum, y = zstat, fill = CHR_GROUP)) +
+  geom_point(shape = 21, color = "grey40", size = 2) +
+  geom_point(data = subset(gr_df, significant), aes(x = bp_cum, y = zstat),
+             shape = 21, fill = "#785594", color = "black", size = 2) +
+
+  # Prioritized: label FOXA2-unique significant genes first (bold)
+  geom_text_repel(data = top_unique,
+                  aes(x = bp_cum, y = zstat, label = gene_id),
+                  size = 3, max.overlaps = Inf, fontface = "bold") +
+
+  # Optional: label other top significant genes
+  geom_text_repel(data = top_other,
+                  aes(x = bp_cum, y = zstat, label = gene_id),
+                  size = 3, max.overlaps = 20, fontface = "plain", color = "black") +
+
+  scale_fill_manual(values = c("0" = "grey70", "1" = "grey40")) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  geom_hline(yintercept = z_thresh, linetype = "dotted", color = "red") +
+  scale_x_continuous(label = axis_df$CHR, breaks = axis_df$center) +
+  theme_minimal() +
+  theme(legend.position = "none",
+        panel.grid.major.x = element_blank(),
+        panel.grid.minor.x = element_blank())
+
+dev.off()
+
+```

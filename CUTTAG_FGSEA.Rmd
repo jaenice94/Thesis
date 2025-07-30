@@ -1,0 +1,193 @@
+---
+title: "FGSEA"
+output: html_notebook
+---
+
+
+### Pathway analysis with FGSEA
+
+1. Generating custom background - based on all your analysis genes (of all the cell types), this needs to be done only once per DEG 
+```{r}
+
+library(clusterProfiler)
+library(ActivePathways)
+library(tidyverse)
+
+input_file <- ("NEUN_vs_FOXA2_annotated")
+
+deg_dir <- "dir/DEG_FOXA2_vs_NEUN/"
+
+# Read annotated
+deg_file <- file.path(deg_dir, paste0(input_file, ".csv"))
+deg_df <- read.csv(deg_file)
+
+data <- deg_df 
+
+analysis_genes <- data$SYMBOL
+```
+
+#if genes are the same across comparisons only run once
+```{r}
+
+# Path to the original GMT file. GMT files can be derived from: https://www.gsea-msigdb.org/gsea/msigdb/mouse/collections.jsp, use the database based on how your genes are called in your data 
+
+gmt_file <- "/GSEA/human/c8.all.v2023.2.Hs.symbols.gmt.txt"
+
+# Read the original GMT file
+gmt <- read.GMT(gmt_file)
+
+# Filter the gene sets
+filtered_gmt <- lapply(gmt, function(gene_set) {
+    if (!is.null(gene_set$genes)) {
+        gene_set$genes <- intersect(gene_set$genes, analysis_genes)
+        if (length(gene_set$genes) > 0) return(gene_set) else return(NULL)
+    }
+    return(NULL)
+})
+
+filtered_gmt <- Filter(Negate(is.null), filtered_gmt)  # Remove NULL entries
+
+# Convert to data frame
+result_df <- do.call(rbind, lapply(filtered_gmt, function(x) {
+  data.frame(id = x$id, name = x$name, genes = paste(x$genes, collapse = "\t"), stringsAsFactors = FALSE)
+}))
+
+# Save filtered GMT file
+gmt_file_BP <- "c8.all.v2023.2.Hs.symbols.filtered.gmt.txt"
+
+write.table(result_df, file = gmt_file_BP, quote = FALSE, sep = "\t", col.names = FALSE, row.names = FALSE)
+
+```
+
+1.Read in GMT
+
+#if genes are the same across comparisons only run once
+```{r}
+library(ActivePathways)
+
+#read in the subsetted pathways for the analysis ready to be used by fgsea
+
+# Read in filtered GMT file
+pathways.BP <- gmtPathways("c8.all.v2023.2.Hs.symbols.filtered.gmt.txt")
+
+# Check the structure of pathways
+head(pathways.BP) %>% lapply(head)
+
+
+```
+
+2. generate function to rank table based on FDR + LOGFC & generate plots
+```{r}
+
+
+  library(fgsea)
+  library(dplyr)
+  library(BiocParallel)
+  library(forcats)
+
+  # Filter for the relevant cell type
+s <- data
+
+  geneList <- s %>%
+    filter(!is.na(SYMBOL), !is.na(logFC), !is.na(PValue)) %>%  # Remove missing values
+    group_by(SYMBOL) %>%
+    slice_min(order_by = PValue, n = 1) %>%  # Keep the peak with the lowest P-value per gene
+    ungroup() %>%  # Ungroup to ensure proper structure
+    mutate(ranking_metric = -log10(PValue) * sign(logFC)) %>%  # Compute ranking metric
+    dplyr::select(SYMBOL, ranking_metric) %>%  # Keep only relevant columns
+    arrange(desc(ranking_metric)) %>%  # Sort genes by ranking metric
+    tibble::deframe()  # Convert to named vector for FGSEA
+```
+
+#validating that the right peaks are chosen (that with the lowest Pvalue)
+```{r}
+# Check if the gene exists in geneList
+gene_symbol <- "SNCA"
+
+if (gene_symbol %in% names(geneList)) {
+  cat("✅ Ranking metric for", gene_symbol, ":", geneList[gene_symbol], "\n")
+} else {
+  cat("⚠️ Gene", gene_symbol, "not found in geneList!\n")
+}
+
+```
+
+# Run FGSEA
+```{r}
+  bpparam <- SerialParam()  
+
+
+  fgsea_res <- fgseaMultilevel(
+    pathways = pathways.BP,
+    stats = geneList,
+    minSize = 15,
+    maxSize = 500,
+    BPPARAM = bpparam,
+    eps = 0
+  )
+
+   fgsea_res$leadingEdge <- sapply(fgsea_res$leadingEdge, function(x) paste(x, collapse = ", "))
+
+fgsea_FOXA2 <- fgsea_res
+write.csv(fgsea_res, file = file.path(deg_dir, paste0(input_file, "_fgsea_all_peaks.csv")), row.names = FALSE)
+```
+
+Visualisation of FGSEA
+
+```{r}
+library(scales)
+
+
+foxa2_all_peaks <- read.csv("dir/DEG_FOXA2_vs_NEUN/FOXA2_vs_NEUN_annotated_fgsea_all_peaks.csv", header = TRUE)
+
+top5_foxa2 <- foxa2_all_peaks %>%
+  dplyr::filter(NES > 0) %>%
+  dplyr::arrange(padj) %>%
+  dplyr::slice(1:5) %>%
+  dplyr::mutate(source = "FOXA2")
+
+neun_all_peaks <- read.csv("dir/DEG_FOXA2_vs_NEUN/NEUN_vs_FOXA2_annotated_fgsea_all_peaks.csv", header = TRUE)
+
+top5_neun <- neun_all_peaks %>%
+  dplyr::filter(NES > 0) %>%
+  dplyr::arrange(padj) %>%
+  dplyr::slice(1:5) %>%
+  dplyr::mutate(source = "NEUN")
+
+# Combine the data
+combined_top10 <- bind_rows(top5_foxa2, top5_neun)
+
+# Define cell type order and arrange by cell type and descending p-value (padj)
+cell_type_order <- c( "FOXA2", "NEUN")
+combined_top10 <- combined_top10 %>%
+  mutate(source = factor(source, levels = cell_type_order)) %>%
+  arrange(source, desc(padj)) %>%   # Arrange by descending padj within each source
+  mutate(pathway = factor(pathway, levels = unique(pathway)))  # Ordering pathways by this combined sort
+
+
+
+library(ggplot2)
+pdf("fgsea_pathways_all_peaks_top5_padj.pdf", width = 10, height = 6)
+
+
+plot <- ggplot(combined_top10, aes(x = interaction(pathway, source), y = NES, fill = source)) +
+  geom_bar(stat = "identity") +
+  geom_text(aes(label = scales::scientific(padj, digits = 2)), vjust = 0.5, hjust = 1.1, color = "black", size = 4) +
+  coord_flip() +
+  labs(title = "Top 3 Pathways by Normalized Enrichment Score (NES)",
+       x = "Pathways",
+       y = "Normalized Enrichment Score (NES)",
+       fill = "Cell Type") +
+  scale_fill_manual(values = c("FOXA2" = "#785594", "NEUN" = "#009E73")) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+
+print(plot)
+
+dev.off()
+
+
+```
+
+
+

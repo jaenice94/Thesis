@@ -1,0 +1,938 @@
+---
+title: "Compiling different lines of evidence for H-MAGMA/PoPS prioritised genes"
+output: html_notebook
+---
+
+H-MAGMA table
+```{r}
+library (dplyr)
+
+setwd("H-magma_dir")
+
+genes <-  read.table("All_peaks_FOXA2_H3K27ac_iCell_Dopa_loops/PD_GP2_2025_Annotations_SNPs_iCell_Loops_All_FOXA2_H3K27ac.genes.out", header = TRUE)
+
+ensembl_to_genes <- read.delim("/magma/required_files/annotated_genes_TxDb.Hsapiens.UCSC.hg19.knownGene.names.org.Hs.eg.db.txt") #hg19
+
+# Merge the two tables based on the 'ENSEMBL' column
+genes_with_symbol <- merge(genes, ensembl_to_genes[, c("ENSEMBL", "SYMBOL")], by.x = "GENE", by.y = "ENSEMBL", all.x = TRUE)
+
+# Calculate adjusted p-values using the Benjamini-Hochberg (FDR) method
+genes_with_symbol$P_adjust <- p.adjust(genes_with_symbol$P, method = "BH")
+
+# Filter for genes
+PD_risk_genes <- subset(genes_with_symbol, P_adjust < 0.001)
+
+PD_risk_genes <- PD_risk_genes %>%
+  rename(SYMBOL = SYMBOL) %>%
+  rename(GENE = GENE)
+```
+
+Category 1: Differentially expressed genes
+ Add Lee at al 2023 DEG results
+```{r}
+library(readxl)
+
+# Read the .xlsm file, skip the first row
+deg_df <- read_excel("../DEG_in_PD/Lee et al 2023/Lee_DEG_in_PD_Table_S3.xlsx", skip = 1)
+
+print(unique(deg_df$`Cell type`))
+
+deg_df_filtered <- deg_df %>%
+  filter(deg_df$`Cell type` %in% c("DopaN", "GabaN"))
+
+deg_df_filtered_HMAGMA <- deg_df_filtered %>%
+  filter(deg_df_filtered$`Gene ID` %in% PD_risk_genes$SYMBOL)
+
+#create a column which captures DEG results per cell type
+deg_df_filtered_HMAGMA <- deg_df_filtered_HMAGMA %>%
+  mutate(DEG_annotation = paste0(`Cell type`, " (", `DEG type`, ")"))
+
+#collapse per gene 
+deg_collapsed <- deg_df_filtered_HMAGMA %>%
+  group_by(`Gene ID`) %>%
+  summarise(Lee_DEG = paste(sort(unique(DEG_annotation)), collapse = ", ")) %>%
+  rename(SYMBOL = `Gene ID`)  # To match H-MAGMA column
+
+
+#Add to Summary table
+hmagma_annotated <- PD_risk_genes %>%
+  left_join(deg_collapsed, by = "SYMBOL")
+```
+
+2. Add Wang et al 2024 DEG 
+
+cluster annotations: 
+C6, C7, C9 = neurons
+  C6_2 = likely DA
+
+  C7_1 = GABAergic
+  C7_2 = Glutamatergic
+  C7_3 = DA neurons
+  
+  C9 = RIT2+TH− neurons (likely also contain DA)
+C0, C3 = Oligos 
+C5 = OPCs
+
+```{r}
+# Read the .xlsm file, skip the first row
+deg_df2 <- read_excel("../DEG_in_PD/Wang_et_al_2024/Wang_et_al_2024_S5_snDEG_PD_vs_CTR.xlsx", skip = 1)
+
+deg_df_filtered2 <- deg_df2 %>%
+  filter(deg_df2$Cluster %in% c("C6_1", "C6_2", "C6_3", "C7_0", "C7_1", "C7_2", "C9"))
+
+deg_df_filtered_HMAGMA2 <- deg_df_filtered2 %>%
+  filter(deg_df_filtered2$Geneid %in% PD_risk_genes$GENE)
+
+# Add DEG_Info column: format "Cluster (Up)" or "Cluster (Down)"
+deg_df_filtered_HMAGMA2 <- deg_df_filtered_HMAGMA2 %>%
+  mutate(DEG_direction = ifelse(avg_log2FC > 0, "Up", "Down"),
+         DEG_Info = paste0(Cluster, " (", DEG_direction, ")"))
+
+#collapse per gene 
+deg_collapsed2 <- deg_df_filtered_HMAGMA2 %>%
+  group_by(Geneid) %>%
+  summarise(Wang_DEG = paste(sort(unique(DEG_Info)), collapse = ", ")) %>%
+  rename(GENE = Geneid)  # To match H-MAGMA column
+
+
+#Add to Summary table
+hmagma_annotated2 <- hmagma_annotated %>%
+  left_join(deg_collapsed2, by = "GENE")
+```
+
+Add Martirosyan et al 2024 
+```{r}
+# Read the .xlsm file, skip the first row
+deg_df3 <- read_excel("../DEG_in_PD/Martirosyan_et_al_2024/Martirosyan_et_al_2024_suppl7_snDEG_PD_ctrl.xlsx", skip = 1)
+
+deg_df_filtered3 <- deg_df3 %>%
+  filter(deg_df3$Subpopulation %in% c("neurons0", "neurons1", "neurons2", "neurons3", "neurons4", "neurons5"))
+
+deg_df_filtered_HMAGMA3 <- deg_df_filtered3 %>%
+  filter(deg_df_filtered3$Gene %in% PD_risk_genes$SYMBOL)
+
+deg_df_filtered_HMAGMA3 <- deg_df_filtered_HMAGMA3 %>%
+  filter(deg_df_filtered_HMAGMA3$`adjusted p-value (Benjamini-Hochberg correction)` < 0.05)
+
+# Add DEG_Info column: format "Cluster (Up)" or "Cluster (Down)"
+deg_df_filtered_HMAGMA3 <- deg_df_filtered_HMAGMA3 %>%
+  mutate(DEG_direction = ifelse(`z-score` > 0, "Up", "Down"),
+         DEG_Info = paste0(Subpopulation, " (", DEG_direction, ")"))
+
+#collapse per gene 
+deg_collapsed3 <- deg_df_filtered_HMAGMA3 %>%
+  group_by(Gene) %>%
+  summarise(Martirosyan_DEG = paste(sort(unique(DEG_Info)), collapse = ", ")) %>%
+  rename(SYMBOL = Gene)  # To match H-MAGMA column
+
+
+#Add to Summary table
+hmagma_annotated3 <- hmagma_annotated2 %>%
+  left_join(deg_collapsed3, by = "SYMBOL")
+```
+
+
+Adams et al 2024 
+```{r}
+deg_df4 <- read_excel("../DEG_in_PD/Adams_et_al_2024/Adams_et_al_2024_S3_snDEG_PD_vs_CTL.xlsx", skip = 1)
+
+
+subset_deg_down <- data.frame(
+  Adams_DEG_in_PD = deg_df4$N_Aged_vs_PD[!is.na(deg_df4$N_Aged_vs_PD)],
+  Adams_DEG = "Neurons (down)"
+)
+
+subset_deg_up <- data.frame(
+  Adams_DEG_in_PD = deg_df4$N_PD_vs_Aged[!is.na(deg_df4$N_PD_vs_Aged)],
+  Adams_DEG = "Neurons (up)"
+)
+
+# Combine both
+adams_deg_combined <- rbind(subset_deg_down, subset_deg_up)
+
+# Optional: Remove duplicates if needed
+adams_deg_combined <- unique(adams_deg_combined)
+
+# Convert into data frame
+deg_df_filtered4 <- adams_deg_combined
+
+deg_df_filtered_HMAGMA4 <- deg_df_filtered4 %>%
+  filter(deg_df_filtered4$Adams_DEG_in_PD %in% PD_risk_genes$SYMBOL)
+
+deg_collapsed4 <- deg_df_filtered_HMAGMA4 %>%
+  group_by(Adams_DEG_in_PD) %>%
+  summarise(Adams_DEG = paste(sort(unique(Adams_DEG)), collapse = ", ")) %>%
+  rename(SYMBOL = Adams_DEG_in_PD)  # To match H-MAGMA column
+
+hmagma_annotated4 <- hmagma_annotated3 %>%
+  left_join(deg_collapsed4, by = "SYMBOL")
+```
+
+Smajic 2022 - inhibitory neurons
+```{r}
+deg_df5 <- read_excel("../DEG_in_PD/Smajic_et_al_2022/Smajic_et_al_2022_snRNA_DEG_inhibitoryN_iPD.xlsx", skip = 1)
+
+deg_df_filtered_HMAGMA5 <- deg_df5 %>%
+  filter(deg_df5$`Ensembl gene ID` %in% PD_risk_genes$GENE)
+
+# Add DEG_Info column: format "Cluster (Up)" or "Cluster (Down)"
+deg_df_filtered_HMAGMA5 <- deg_df_filtered_HMAGMA5 %>%
+  mutate(DEG_direction = ifelse(estimate > 0, "Up", "Down"),
+         DEG_Info = paste0("InhibN", " (", DEG_direction, ")"))
+
+#collapse per gene 
+deg_collapsed5 <- deg_df_filtered_HMAGMA5 %>%
+  group_by(`Ensembl gene ID`) %>%
+  summarise(Smajic_DEG = paste(sort(unique(DEG_Info)), collapse = ", ")) %>%
+  rename(GENE = `Ensembl gene ID`)  # To match H-MAGMA column
+
+
+#Add to Summary table
+hmagma_annotated5 <- hmagma_annotated4 %>%
+  left_join(deg_collapsed5, by = "GENE")
+```
+
+
+Category 2: QTL data - focusing of coloc - QTLs which colocalise with PD-GWAS signal
+
+Add eQTL data
+(Kia et al., 2021) Bulk brain based QTLs (eQTL, Splicing QTL)
+
+```{r}
+# Read the .xlsm file, skip the first row
+eQTL <- read_excel("../eQTL_supplementary/Kia_et_al_2021/Kia_Coloc_eQTL_PD.xlsx", skip = 1)
+
+eQTL_filtered <- eQTL %>%
+  filter(eQTL$gene_symbol %in% PD_risk_genes$SYMBOL)
+
+library(dplyr)
+
+eQTL_hits_all <- eQTL_filtered %>%
+  mutate(coloc_strength = case_when(
+    PPH4 > 0.9 ~ "strong",
+    PPH4 > 0.75 ~ "moderate",
+    PPH4 > 0.5 ~ "moderately_low",
+    TRUE ~ "low"
+  ))
+
+eQTL_hits_all <- eQTL_hits_all %>%
+  mutate(Region_label = paste0(eQTL_dataset, "_", tissue))
+
+# Combine strength and region into a unified string per row
+eQTL_hits_all <- eQTL_hits_all %>%
+  mutate(Strength_Region = paste0(coloc_strength, " (", Region_label, ")"))
+
+# Collapse across multiple entries per gene
+eqtl_coloc_summary <- eQTL_hits_all %>%
+  group_by(gene_symbol) %>%
+  summarise(
+    Kia_eQTL_Coloc = paste(sort(unique(Strength_Region)), collapse = ", ")
+  )
+
+eqtl_coloc_summary <- eqtl_coloc_summary %>%
+  rename(SYMBOL = gene_symbol)
+
+
+#Add to summary
+hmagma_annotated6 <- hmagma_annotated5 %>%
+  left_join(eqtl_coloc_summary, by = "SYMBOL")
+```
+
+Add splice QTLs
+```{r}
+sQTL <- read_excel("../eQTL_supplementary/Kia_et_al_2021/Kia_Coloc_sQTL_PD.xlsx", skip = 1)
+
+sQTL_filtered <- sQTL %>%
+  filter(sQTL$gene_symbol %in% PD_risk_genes$SYMBOL)
+
+sQTL_filtered <- sQTL_filtered %>%
+  mutate(Region_label = paste(gene_symbol, tissue, exon_number, sep = "_"))
+
+sQTL_classified <- sQTL_filtered %>%
+  mutate(sQTL_class = case_when(
+    PPH4_exon > 0.9 & PPH4_gene < 0.5 & PPH3_PPH4_ratio_gene > 2 ~ "strong_sQTL",
+    PPH4_exon > 0.75 & PPH4_gene < 0.5 & PPH3_PPH4_ratio_gene > 1.5 ~ "moderate_sQTL",
+    TRUE ~ "shared_or_uncertain"
+  ))
+
+sQTL_classified <- sQTL_classified %>%
+  mutate(Strength_Region = paste0(sQTL_class, " (", Region_label, ")"))
+
+
+# Collapse across multiple entries per gene
+sqtl_coloc_summary <- sQTL_classified %>%
+  group_by(gene_symbol) %>%
+  summarise(
+    Kia_sQTL_Coloc = paste(sort(unique(Strength_Region)), collapse = ", ")
+  )
+
+sqtl_coloc_summary <- sqtl_coloc_summary %>%
+  rename(SYMBOL = gene_symbol)
+
+
+#Add to summary
+hmagma_annotated7 <- hmagma_annotated6 %>%
+  left_join(sqtl_coloc_summary, by = "SYMBOL")
+```
+
+Add eQTL from Jang 2025
+```{r}
+# Read the .xlsm file, skip the first row
+eQTL2 <- read_excel("../eQTL_supplementary/Jang_SingleBrain_2025/SingleBrain_Table9_COLOC.xlsx", skip = 0)
+
+eQTL_PD <- eQTL2 %>%
+  filter(eQTL2$Disease == "PD")
+
+eQTL_filtered <- eQTL_PD %>%
+  filter(eQTL_PD$`QTL gene ID` %in% PD_risk_genes$GENE)
+
+eQTL_hits_all2 <- eQTL_filtered %>%
+  mutate(coloc_strength = case_when(
+    PP4 > 0.9 ~ "strong",
+    PP4 > 0.75 ~ "moderate",
+    PP4 > 0.5 ~ "moderately_low",
+    TRUE ~ "low"
+  ))
+
+# Combine strength and region into a unified string per row
+eQTL_hits_all2 <- eQTL_hits_all2 %>%
+  mutate(Strength_Region = paste0(coloc_strength, " (", QTL, ")"))
+
+# Collapse across multiple entries per gene
+eqtl_coloc_summary2 <- eQTL_hits_all2 %>%
+  group_by(`QTL gene ID`) %>%
+  summarise(
+    Jang_eQTL_Coloc = paste(sort(unique(Strength_Region)), collapse = ", ")
+  )
+
+eqtl_coloc_summary2 <- eqtl_coloc_summary2 %>%
+  rename(GENE = `QTL gene ID`)
+
+
+#Add to summary
+hmagma_annotated8 <- hmagma_annotated7 %>%
+  left_join(eqtl_coloc_summary2, by = "GENE")
+```
+
+Jerber et al 2021 - DA neurons (iPSC-differentiation)
+```{r}
+# Read the .xlsm file, skip the first row
+eQTL3 <- read_excel("../eQTL_supplementary/Jerber_et_al_2021/Jerber_et_al_2021_S9_coloc_analysis.xlsx", skip = 1)
+
+eQTL_PD3 <- eQTL3 %>%
+  filter(eQTL3$study_id == "PD")
+
+eQTL_filtered3 <- eQTL_PD3 %>%
+  filter(eQTL_PD3$Ensembl_ID %in% PD_risk_genes$GENE)
+
+eQTL_hits_all3 <- eQTL_filtered3 %>%
+  mutate(coloc_strength = case_when(
+    PP4 > 0.9 ~ "strong",
+    PP4 > 0.75 ~ "moderate",
+    PP4 > 0.5 ~ "moderately_low",
+    TRUE ~ "low"
+  ))
+
+# Combine strength and region into a unified string per row
+eQTL_hits_all3 <- eQTL_hits_all3 %>%
+  mutate(Strength_Region = paste0(coloc_strength, " (", celltype_tissue, ")"))
+
+# Collapse across multiple entries per gene
+eqtl_coloc_summary3 <- eQTL_hits_all3 %>%
+  group_by(Ensembl_ID) %>%
+  summarise(
+    Jerber_eQTL_Coloc = paste(sort(unique(Strength_Region)), collapse = ", ")
+  )
+
+eqtl_coloc_summary3 <- eqtl_coloc_summary3 %>%
+  rename(GENE = Ensembl_ID)
+
+
+#Add to summary
+hmagma_annotated9 <- hmagma_annotated8 %>%
+  left_join(eqtl_coloc_summary3, by = "GENE")
+```
+
+Haglund et al 2025
+```{r}
+eQTL4 <- read_excel("../eQTL_supplementary/Haglund_et_al_2024/Haglund_et_al_2025_eQTL_S4_coloc.xlsx", skip = 1)
+
+
+eQTL_PD4 <- eQTL4 %>%
+  filter(eQTL4$GWAS == "PD 2019")
+
+eQTL_filtered4 <- eQTL_PD4 %>%
+  filter(eQTL_PD4$Gene %in% PD_risk_genes$SYMBOL)
+
+eQTL_hits_all4 <- eQTL_filtered4 %>%
+  mutate(coloc_strength = case_when(
+    PP.H4 > 0.9 ~ "strong",
+    PP.H4 > 0.75 ~ "moderate",
+    PP.H4 > 0.5 ~ "moderately_low",
+    TRUE ~ "low"
+  ))
+
+# Combine strength and region into a unified string per row
+eQTL_hits_all4 <- eQTL_hits_all4 %>%
+  mutate(Strength_Region = paste0(coloc_strength, " (", `Cell-type`, ")"))
+
+# Collapse across multiple entries per gene
+eqtl_coloc_summary4 <- eQTL_hits_all4 %>%
+  group_by(Gene) %>%
+  summarise(
+    Haglund_eQTL_Coloc = paste(sort(unique(Strength_Region)), collapse = ", ")
+  )
+
+eqtl_coloc_summary4 <- eqtl_coloc_summary4 %>%
+  rename(SYMBOL = Gene)
+
+
+#Add to summary
+hmagma_annotated10 <- hmagma_annotated9 %>%
+  left_join(eqtl_coloc_summary4, by = "SYMBOL")
+```
+
+Category 3: Drug-ability
+
+Adding OpenTarget evidence for PD
+
+To inquire with OpenTargets using functions from https://github.com/eleonore-schneeg/Omix/blob/main/R/open_targets.R
+```{r}
+gene_list <- PD_risk_genes$GENE  
+```
+
+Functions required for inquiry
+```{r}
+OpenTarget_dataframe <- function(disease_id = "MONDO_0005180",
+                            size = 1000,
+                            genes) {
+  opentarget_results <- get_diseaseAssociations_df(
+    disease_id = disease_id,
+    size = size
+  )
+
+  final <- opentarget_results[
+    which(opentarget_results$targetSymbol %in% genes),
+  ]
+
+  return(final)
+}
+
+
+get_diseaseAssociations_df <- function(disease_id = "MONDO_0005180",
+                                       size = 1000) {
+  args <- list(
+    disease_id = disease_id,
+    size = size
+  )
+  data <- do.call(OpenTargets, args)
+
+  # Flatten and make sure required fields exist
+  if (length(data) == 0 || !"datatypeScores" %in% names(data)) {
+    stop("No association data returned or invalid format.")
+  }
+
+  # Extract overallScore from nested structure
+  data$overallScore <- purrr::map_dbl(data$datatypeScores, function(x) {
+    if (is.null(x)) return(NA_real_)
+    score <- tryCatch(x$score, error = function(e) NA_real_)
+    return(score)
+  })
+
+  # Now unnest datatype scores for detailed views
+  data_clean <- data %>%
+    tidyr::unnest(datatypeScores) %>%
+    tidyr::pivot_wider(names_from = "id", values_from = "score")
+
+  return(data_clean)
+}
+
+OpenTargets <- function(disease_id = "MONDO_0005180", size = 10) {
+  query_url <- "https://api.platform.opentargets.org/api/v4/graphql"
+
+  query_string <- sprintf('
+    query {
+      disease(efoId: "%s") {
+        associatedTargets(page: { index: 0, size: %d }) {
+          rows {
+            target {
+              id
+              approvedSymbol
+            }
+            score
+          }
+        }
+      }
+    }
+  ', disease_id, size)
+
+  response <- httr::POST(
+    url = query_url,
+    body = list(query = query_string),
+    encode = "json"
+  )
+
+  content_raw <- rawToChar(response$content)
+  data <- jsonlite::fromJSON(content_raw, simplifyVector = FALSE)
+
+  rows <- data$data$disease$associatedTargets$rows
+
+  # Extract values safely from nested lists
+  df <- data.frame(
+    targetId = sapply(rows, function(x) x$target$id),
+    targetSymbol = sapply(rows, function(x) x$target$approvedSymbol),
+    score = sapply(rows, function(x) x$score)
+  )
+
+  return(df)
+}
+
+
+
+OpenTargets()
+
+```
+
+Run the Query for disease relevance
+```{r}
+# Query OpenTargets
+ot_results <- OpenTargets(disease_id = "MONDO_0005180", size = 3000)
+
+# Filter and rename, then remove targetSymbol
+matched_results <- ot_results %>%
+  filter(targetId %in% gene_list) %>%
+  rename(
+    GENE = targetId,
+    OpenTarget_score = score
+  ) %>%
+  select(GENE, OpenTarget_score)  
+
+# Merge into summary table
+hmagma_annotated11 <- hmagma_annotated10 %>%
+  left_join(matched_results, by = "GENE")
+```
+
+Extracting potential for druggability
+
+Function
+```{r}
+get_druggability_features <- function(ensembl_id) {
+  query_url <- "https://api.platform.opentargets.org/api/v4/graphql"
+  request_body <- list(
+    query = paste0('
+      query {
+        target(ensemblId: "', ensembl_id, '") {
+          tractability {
+            modality
+            label
+            value
+          }
+        }
+      }
+    ')
+  )
+  response <- httr::POST(url = query_url, body = request_body, encode = "json")
+  parsed <- jsonlite::fromJSON(rawToChar(response$content))
+
+  # Fail-safe in case no data returned
+  if (is.null(parsed$data$target$tractability)) {
+    return(data.frame(
+      EnsemblID = ensembl_id,
+      Approved_Drug = NA,
+      High_Quality_Ligand = NA,
+      Small_Molecule_Binder = NA
+    ))
+  }
+
+  tract_data <- parsed$data$target$tractability
+
+  # Check if any row with the desired label has value == TRUE
+  get_value <- function(label) {
+    match <- tract_data[tract_data$label == label, ]
+    if (nrow(match) > 0) return(any(match$value == TRUE)) else return(NA)
+  }
+
+  return(data.frame(
+    EnsemblID = ensembl_id,
+    Approved_Drug = get_value("Approved Drug"),
+    High_Quality_Ligand = get_value("High-Quality Ligand"),
+    Small_Molecule_Binder = get_value("Small Molecule Binder")
+  ))
+}
+
+```
+
+Run query for drug potential
+```{r}
+results_list <- lapply(gene_list, function(gene) {
+  tryCatch(get_druggability_features(gene), error = function(e) NULL)
+})
+
+# Combine into single data frame
+druggability_df <- do.call(rbind, results_list)
+
+druggability_df <- druggability_df %>%
+  rename(GENE = EnsemblID)
+
+library(dplyr)
+
+druggability_collapsed <- druggability_df %>%
+  distinct(GENE, Approved_Drug, High_Quality_Ligand, Small_Molecule_Binder)
+
+# Optional: double-check that each GENE now has only one row
+druggability_collapsed %>%
+  count(GENE) %>%
+  filter(n > 1)  # should return 0 rows if all is good
+
+hmagma_annotated12 <- hmagma_annotated11 %>%
+  left_join(druggability_collapsed, by = "GENE")
+
+```
+
+Category 4: SNP support?
+
+Farrow et al 2024 - HEK293 MPRA Nalls 2019 variants
+```{r}
+
+# Read raw lines
+lines <- readLines("../All_peaks_FOXA2_H3K27ac_iCell_Dopa_loops/Annotations_SNPs_iCell_Loops_All_FOXA2_H3K27ac.transcript.annot")
+
+# Initialize list to store valid entries
+entries <- list()
+current_entry <- NULL
+
+for (line in lines) {
+  fields <- strsplit(line, "\t")[[1]]
+  
+  # Check if first field looks like a valid Ensembl ID
+  if (grepl("^ENSG\\d+", fields[1])) {
+    # Start a new entry
+    current_entry <- list(
+      ensembl_id = fields[1],
+      region = fields[2],
+      snps = fields[3:length(fields)]
+    )
+    entries[[length(entries) + 1]] <- current_entry
+  } else if (!is.null(current_entry)) {
+    # This line is a continuation — append SNPs
+    current_entry$snps <- c(current_entry$snps, fields)
+    # Update the last entry in the list
+    entries[[length(entries)]] <- current_entry
+  }
+}
+
+# Convert to data.frame
+library(dplyr)
+
+annot_df <- bind_rows(lapply(entries, function(entry) {
+  tibble(
+    ensembl_id = entry$ensembl_id,
+    region = entry$region,
+    SNPs = paste(na.omit(entry$snps), collapse = ",")
+  )
+}))
+
+Relevant_annotations <- annot_df %>%
+  filter(annot_df$ensembl_id %in% PD_risk_genes$GENE)
+
+# Read the .xlsm file, skip the first row
+mpra_df <- read_excel("../MPRA/Farrow_et_al_2024_HEK293_PD/Farrow_2024_MPRA_enhancer_variants_Supp6.xlsx", skip = 1)
+
+# Extract rsID from Element_ID
+mpra_df <- mpra_df %>%
+  mutate(risk_snp = stringr::str_extract(Element_ID, "rs[0-9]+"))
+
+mpra_snps <- mpra_df %>%
+  pull(risk_snp) %>% 
+  unique()
+
+mpra_snps <- unique(mpra_df$risk_snp)
+
+
+library(stringr)
+
+genes_with_mpra_snps <- Relevant_annotations %>%
+  rowwise() %>%
+  mutate(
+    SNP_list = list(if (!is.na(SNPs)) trimws(unlist(strsplit(SNPs, ","))) else character(0)),
+    MPRA_validated = list(intersect(SNP_list, mpra_snps))
+  ) %>%
+  filter(length(MPRA_validated) > 0) %>%
+  mutate(
+    MPRA_SNPs = paste(MPRA_validated, collapse = ", ")
+  ) %>%
+  ungroup() %>%
+  select(ensembl_id, region, MPRA_SNPs)
+
+
+# 1. Select and rename columns from MPRA SNP match table
+farrow_mpra_summary <- genes_with_mpra_snps %>%
+  select(GENE = ensembl_id, Farrow_MPRA = MPRA_SNPs)
+
+
+hmagma_annotated13 <- hmagma_annotated12 %>%
+  left_join(farrow_mpra_summary, by = "GENE")
+```
+
+
+Chen et al 2022 - SH-SY5Y and U251 MPRA Nalls 2014 + Chang 2017 variants, but only a select 15. 
+```{r}
+
+# Read the .xlsm file, skip the first row
+mpra_df2 <- read_excel("../MPRA/Chen_et_al_2022_SH_SY5Y_U251_15rs/Chen_et_al_2022_MPRA_SH_U251_T7.xlsx", skip = 1)
+
+# Regulatory effect in at least one cell line
+mpra_snps2 <- mpra_df2 %>%
+  filter(`SH-SY5Y` == "Yes" | `SK-N-SH` == "Yes") %>%
+  pull(`Regulatory SNP id`) %>%
+  unique()
+
+
+genes_with_mpra_snps2 <- Relevant_annotations %>%
+  rowwise() %>%
+  mutate(
+    SNP_list = list(if (!is.na(SNPs)) trimws(unlist(strsplit(SNPs, ","))) else character(0)),
+    MPRA_validated = list(intersect(SNP_list, mpra_snps2))
+  ) %>%
+  filter(length(MPRA_validated) > 0) %>%
+  mutate(
+    MPRA_SNPs = paste(MPRA_validated, collapse = ", ")
+  ) %>%
+  ungroup() %>%
+  select(ensembl_id, region, MPRA_SNPs)
+
+
+# 1. Select and rename columns from MPRA SNP match table
+chen_mpra_summary <- genes_with_mpra_snps2 %>%
+  select(GENE = ensembl_id, Chen_MPRA = MPRA_SNPs)
+
+
+hmagma_annotated14 <- hmagma_annotated13 %>%
+  left_join(chen_mpra_summary, by = "GENE")
+```
+
+Schilder 2020: Fine-mapping support
+```{r}
+
+library(tidyr)
+library(stringr)
+
+# Read the .xlsm file, skip the first row
+fineMap <- read_excel("../Finemapping/Schilder_et_al_2020/Schilder_et_al_2020_fine_mapping.xlsx", skip = 0)
+
+fineMap_snps <- fineMap %>%
+  filter(!is.na(`CredSet.RSID`)) %>%
+  mutate(SNPs = strsplit(`CredSet.RSID`, ",")) %>%
+  unnest(SNPs) %>%
+  mutate(SNPs = str_trim(SNPs)) %>%
+  pull(SNPs) %>%
+  unique()
+
+genes_with_fineMap_snps <- Relevant_annotations %>%
+  rowwise() %>%
+  mutate(
+    SNP_list = list(if (!is.na(SNPs)) trimws(unlist(strsplit(SNPs, ","))) else character(0)),
+    fine_mapped = list(intersect(SNP_list, fineMap_snps))
+  ) %>%
+  filter(length(fine_mapped) > 0) %>%
+  mutate(
+    fineMap_SNPs = paste(fine_mapped, collapse = ", ")
+  ) %>%
+  ungroup() %>%
+  select(ensembl_id, region, fineMap_SNPs)
+
+
+# 1. Select and rename columns from MPRA SNP match table
+schilder_FM_summary <- genes_with_fineMap_snps %>%
+  select(GENE = ensembl_id, Schilder_fineMap = fineMap_SNPs)
+
+hmagma_annotated15 <- hmagma_annotated14 %>%
+  left_join(schilder_FM_summary, by = "GENE")
+```
+
+Category 5: GWAS-linked genes? 
+
+GP2 - nearby genes
+```{r}
+# Read the .xlsm file, skip the first row
+GWAS_genes <- read_excel("../GWAS/GP2_2025_PoPS_genes/GP2_2025_nearby_genes_all_identified.xlsx", skip = 0)
+
+
+GWAS_genes_filtered <- GWAS_genes %>%
+  filter(GWAS_genes$`Nearest Gene` %in% PD_risk_genes$SYMBOL)
+
+# Collapse across multiple entries per gene
+GWAS_genes_filterd_summary <- GWAS_genes_filtered %>%
+  group_by(`Nearest Gene`) %>%
+  summarise(
+    GP2_loci_nearest_genes = paste(`Known or Novel`, collapse = ", ")
+  )
+
+GWAS_genes_filterd_summary <- GWAS_genes_filterd_summary %>%
+  rename(SYMBOL = `Nearest Gene`)
+
+
+#Add to summary
+hmagma_annotated16 <- hmagma_annotated15 %>%
+  left_join(GWAS_genes_filterd_summary, by = "SYMBOL")
+
+```
+
+GP2 - PoPS prioritised genes
+```{r}
+# Read the .xlsm file, skip the first row
+GWAS_PoPS <- read_excel("../GWAS/GP2_2025_PoPS_genes/GP2_2025_Table4_pops_genes.xlsx", skip = 0)
+
+GWAS_PoPS_filtered <- GWAS_PoPS %>%
+  filter(GWAS_PoPS$SYMBOL %in% PD_risk_genes$SYMBOL)
+
+# Collapse across multiple entries per gene
+GWAS_PoPS_filtered_summary <- GWAS_PoPS_filtered %>%
+  group_by(SYMBOL) %>%
+  summarise(
+    GP2_PoPS_score = paste(PoPS_Score, collapse = ", ")
+  )
+
+
+#Add to summary
+hmagma_annotated17 <- hmagma_annotated16 %>%
+  left_join(GWAS_PoPS_filtered_summary, by = "SYMBOL")
+```
+
+Yu 2024 Machine learning prioritisation for Nalls2019 loci
+```{r}
+# Read the .xlsm file, skip the first row
+GWAS_ML <- read_excel("../GWAS/Yu_2024_ML/Yu_et_al_2024_Machine_L_prediction_top3ranks_locus.xlsx", skip = 0)
+
+GWAS_ML_filtered <- GWAS_ML %>%
+  filter(GWAS_ML$Gene %in% PD_risk_genes$SYMBOL)
+
+# Collapse across multiple entries per gene
+GWAS_ML_filtered_summary <- GWAS_ML_filtered %>%
+  group_by(Gene) %>%
+  summarise(
+    Yu_ML = paste(Locus,"(",`Prediction rank`,",",`Prediction probability`,")", collapse =", ")
+  )
+
+GWAS_ML_filtered_summary <- GWAS_ML_filtered_summary %>%
+  rename(SYMBOL = Gene)
+
+#Add to summary
+hmagma_annotated18 <- hmagma_annotated17 %>%
+  left_join(GWAS_ML_filtered_summary, by = "SYMBOL")
+```
+
+Lange 2025 - PoPS - prioritisation Nalls 2019
+```{r}
+# Read the .xlsm file, skip the first row
+GWAS_PoPS2 <- read_excel("../GWAS/Lange_et_al_2025_PoPS/Lange_et_al_2025_PoPS_GWAS.xlsx", skip = 0)
+
+GWAS_PoPS2_filtered <- GWAS_PoPS2 %>%
+  filter(GWAS_PoPS2$Prioritized == "TRUE") 
+
+GWAS_PoPS2_filtered2 <- GWAS_PoPS2_filtered %>%
+  filter(GWAS_PoPS2_filtered$ENSGID %in% PD_risk_genes$GENE)
+
+# Collapse across multiple entries per gene
+GWAS_PoPS2_filtered_summary <- GWAS_PoPS2_filtered2 %>%
+  group_by(ENSGID) %>%
+  summarise(
+    Lange_PoPS = paste(Prioritized, "(",Locus,")", collapse =", ")
+  )
+
+GWAS_PoPS2_filtered_summary <- GWAS_PoPS2_filtered_summary %>%
+  rename(GENE = ENSGID)
+
+#Add to summary
+hmagma_annotated19 <- hmagma_annotated18 %>%
+  left_join(GWAS_PoPS2_filtered_summary, by = "GENE")
+```
+
+
+
+```{r}
+hmagma_binary_score <- hmagma_annotated19 %>%
+  mutate(
+    # Binary presence scoring: 1 point if not NA or TRUE
+    DEG_support = as.integer(!is.na(Lee_DEG) |
+                             !is.na(Wang_DEG) |
+                             !is.na(Martirosyan_DEG) |
+                             !is.na(Adams_DEG) |
+                             !is.na(Smajic_DEG)),
+
+    QTL_support = as.integer(!is.na(Kia_eQTL_Coloc) |
+                             !is.na(Kia_sQTL_Coloc) |
+                             !is.na(Jang_eQTL_Coloc) |
+                             !is.na(Jerber_eQTL_Coloc) |
+                             !is.na(Haglund_eQTL_Coloc)),
+
+    MPRA_support = as.integer(!is.na(Farrow_MPRA) |
+                              !is.na(Chen_MPRA)),
+
+    fineMap_support = as.integer(!is.na(Schilder_fineMap)),
+
+    GWAS_support = as.integer(!is.na(GP2_PoPS_score) |
+                              !is.na(Yu_ML) |
+                              !is.na(Lange_PoPS) |
+                              !is.na(GP2_loci_nearest_genes)),
+    
+    OpenTarget_support = as.integer(!is.na(OpenTarget_score)),
+
+    Druggability_support = as.integer(Approved_Drug == TRUE |
+                                      High_Quality_Ligand == TRUE |
+                                      Small_Molecule_Binder == TRUE),
+
+    # Additive binary support score
+    Evidence_Score_Binary = DEG_support + QTL_support + MPRA_support +
+                            fineMap_support + GWAS_support + OpenTarget_support
+  )
+
+
+# Subset GENE and support columns
+hmagma_support_subset <- hmagma_binary_score %>%
+  select(GENE, SYMBOL, Evidence_Score_Binary)
+
+# Subset GENE and support columns
+hmagma_tx <- hmagma_binary_score %>%
+  select(GENE, SYMBOL, Evidence_Score_Binary, DEG_support, QTL_support, MPRA_support,
+                            fineMap_support, GWAS_support, OpenTarget_support, Druggability_support)
+
+support_matrix <- hmagma_binary_score %>%
+  select(SYMBOL, DEG_support, QTL_support, MPRA_support,
+         fineMap_support, GWAS_support, OpenTarget_support, Druggability_support)
+
+library(UpSetR)
+
+# Convert SYMBOL to rownames for better readability
+rownames(support_matrix) <- support_matrix$SYMBOL
+support_matrix$SYMBOL <- NULL
+
+write.csv(hmagma_binary_score, "Evidence_All_FOXA2_HMAGMA_0.001_binary_scores.csv")
+
+write.csv(hmagma_support_subset, "Evidence_All_FOXA2_HMAGMA_0.001_support_subset.csv")
+
+```
+
+```{r}
+min_1 <- hmagma_support_subset %>%
+  filter(Evidence_Score_Binary > 0)
+
+#of FOXA2 specific ones:
+
+FOXA2_unique <- read.csv("specific_genes/FOXA2_unique_0.001_iCell.csv")
+
+
+library(dplyr)
+
+# Option 1: inner join (only genes present in both)
+merged_inner <- min_1 %>%
+  inner_join(FOXA2_unique, by = "GENE")
+
+binary_foxa2_unique <- hmagma_binary_score %>%
+  filter(GENE %in% FOXA2_unique$GENE)
+
+write.csv(binary_foxa2_unique, "Evidence_unique_FOXA2_HMAGMA_0.001_support_subset.csv")
+
+```
+
+

@@ -1,0 +1,208 @@
+---
+title: "Plot -	Single-annotation joint model LDSC"
+output: html_notebook
+---
+
+Janis 
+
+```{r}
+library(tidyr)
+library(tidyverse)
+library(data.table)
+library(dbplyr)
+
+# Set working directory
+setwd("/ldsc/heritability_final/")
+
+# List all LDSC result files
+files <- list.files(pattern = "10\\.07\\.2025_ID_.*_SINGLE\\.results$")
+
+# Cell types
+cell_types <- c('FOXA1_all_final_human_peaks_noXYrandom.hg38tohg19',
+'iCell_ATAC_final_human_peaks_noXYrandom.hg38tohg19',
+'iCell_H3K27ac_final_human_peaks_noXYrandom.hg38tohg19')
+
+
+
+# Read and extract relevant rows and metadata
+ldsc_summary <- list()
+
+for (file in files) {
+  # Read the file
+  df <- read_tsv(file, show_col_types = FALSE)
+  
+  # Filter for L2_1 row
+  l2_1_row <- df %>% filter(Category == "L2_1")
+  
+  # Extract annotation from filename
+  annotation <- str_replace(file, "10\\.07\\.2025_ID_", "")
+  annotation <- str_replace(annotation, "_SINGLE\\.results", "")
+  
+  # Match cell type
+  matched_cell <- cell_types[which.max(str_detect(annotation, fixed(cell_types)))]
+  disease <- str_remove(annotation, paste0(matched_cell, "$"))
+  disease <- str_remove(disease, "_$")  # Clean trailing underscore if any
+  
+  # Add metadata columns
+  l2_1_row$Annotation <- annotation
+  l2_1_row$CellType <- matched_cell
+  l2_1_row$Disease <- disease
+  
+  # Store
+  ldsc_summary[[file]] <- l2_1_row
+}
+
+# Combine into dataframe
+ldsc_results <- bind_rows(ldsc_summary)
+
+```
+
+```{r}
+
+#calculate p value (one-sided - positive enrichment only) for zscore
+ldsc_results$Coefficient_p <- pnorm(ldsc_results$`Coefficient_z-score`, lower.tail = FALSE)
+
+ldsc_results$transformed_p <- round(x = -log10(ldsc_results$Coefficient_p), digits = 5)
+
+ldsc_results <- ldsc_results %>%
+  group_by(Disease) %>%
+  mutate(
+    Coefficient_p_FDR = p.adjust(Coefficient_p, method = "BH"),
+    Coefficient_p_BF = p.adjust(Coefficient_p, method = "bonferroni")
+  ) %>%
+  ungroup()
+
+ldsc_results$transformed_p[ldsc_results$`Coefficient_z-score` < 0] <- 0
+
+```
+
+
+```{r}
+relabel_rules <- c("AD_Jan" = "AD",
+                   "PD_nalls_no23_r_py_2" ="PD_nalls",
+                   "PD_GP2" = "PD_GP2",
+                   "ALS_rheenen" = "ALS",
+                   "MS_Andlauer" = "MS",
+                   "SCZ_PardinasInfo9" = "SCZ"
+                   )
+
+library(reshape2)
+
+ldsc_data <- ldsc_results %>% mutate(Disease = ifelse(Disease %in% names(relabel_rules), relabel_rules[Disease], Disease))
+
+
+ldsc_data$ordering <- ldsc_data$CellType
+
+# Pivot to wide format: rows = CellTypes, columns = Diseases, values = log10_FDR
+ldsc_matrix <- reshape2::dcast(ldsc_data, ordering ~ Disease, value.var = "transformed_p", fill = 0)
+
+# Set the row names to the "ordering" column
+row.names(ldsc_matrix) <- ldsc_matrix$ordering
+
+# Define the new order of the columns
+new_order <- c("AD", "PD_nalls", "PD_GP2", "MS", "ALS", "SCZ")
+
+# Subset the ldsc_matrix using the new order
+ldsc_matrix <- ldsc_matrix[, new_order]
+
+# Convert to matrix
+ldsc_matrix <- as.matrix(ldsc_matrix)
+
+# Reshape the matrix for plotting with ggplot2
+ldsc_melt <- reshape2::melt(ldsc_matrix)
+
+#create the row annotations 
+
+row_labels <- rownames(ldsc_matrix)  # Cell types
+col_labels <- colnames(ldsc_matrix)  # Disease types
+
+diseases <- c(colnames(ldsc_matrix))
+cell_types <- c(rownames(ldsc_matrix))
+
+ann_row <- data.frame(cell_types)
+row.names(ann_row) <- ann_row$cell_types
+
+
+
+ann_col <- data.frame(diseases)
+row.names(ann_col) <- ann_col$diseases
+
+# Define a custom color ramp with white, light green, bright green, and dark green
+custom_colors <- colorRampPalette(c("#FFFFFF","#CEDAA4", "#C1D189", "#96A28F", "#354E28"))(10)
+
+gp_row = which(diff(as.numeric(factor(ann_row$cell_types)))!=0)
+gp_col = which(diff(as.numeric(factor(ann_col$diseases)))!=0)
+
+# Initialize
+ldsc_data$star_mark <- ""
+
+# FDR-based stars
+ldsc_data$star_mark[ldsc_data$Coefficient_p_BF < 0.05] <- "*"
+ldsc_data$star_mark[ldsc_data$Coefficient_p_BF < 0.01] <- "**"
+ldsc_data$star_mark[ldsc_data$Coefficient_p_BF < 0.001] <- "***"
+
+
+# Create matrix
+# Text (stars)
+star_matrix <- reshape2::dcast(ldsc_data, ordering ~ Disease, value.var = "star_mark", fill = "")
+row.names(star_matrix) <- star_matrix$ordering
+star_matrix <- star_matrix[, new_order]
+star_matrix <- as.matrix(star_matrix)
+
+# Define your exact row names (must match rownames(ldsc_matrix))
+row_labels <- rownames(ldsc_matrix)
+
+
+
+library(pheatmap)
+
+# Manually assign a color to each
+row_color_map <- c(
+  "FOXA1_all_final_human_peaks_noXYrandom.hg38tohg19" = "#B8A5C5", 
+  "iCell_ATAC_final_human_peaks_noXYrandom.hg38tohg19" = "#7CB4D4", 
+  "iCell_H3K27ac_final_human_peaks_noXYrandom.hg38tohg19"  = "#7CCAB5"
+)
+
+# Create row annotation using the rownames
+ann_row <- data.frame(Source = row_labels)
+rownames(ann_row) <- row_labels
+
+# Assign colors
+ann_colors <- list(Source = row_color_map)
+
+file.path <- "/rds/general/project/epinott/live/user_analysed_data/Janis/ldsc/heatmaps_final"
+pdf(file = file.path(file.path, "heatmap_10.07.2025_FOXA1_sites_single_annotation_LDSC_BF_coefficientP.pdf"),
+    height = 20, width = 20)
+
+heatmap <- pheatmap(ldsc_matrix,
+         color = custom_colors,
+         cluster_rows = FALSE,
+         cluster_cols = FALSE,
+         breaks = seq(0, 5, length.out = 11),    
+         legend_breaks = seq(0, 10, 2),  
+         display_numbers = star_matrix,
+         number_color = "black",
+        annotation_row = ann_row,
+         annotation_colors = ann_colors,
+         fontsize_number = 16,
+         fontsize_row = 0,
+         fontsize_col = 12,
+         main = "-log10(Coefficient p) (Stars = BF. sig)",
+         border_color = "darkgrey",
+         gaps_row = gp_row,
+         gaps_col = gp_col,
+         show_rownames = FALSE,
+         cellwidth = 30,
+         cellheight = 30)
+
+
+
+print(heatmap)
+
+dev.off()
+
+print(heatmap)
+
+write.csv(ldsc_results, "single_annotation_model_FOXA1_sites.csv")
+```
+

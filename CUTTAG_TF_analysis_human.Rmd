@@ -1,0 +1,363 @@
+---
+title: "TF analysis FOXA2 vs NEUN TF-analysis"
+output: html_notebook
+---
+
+1. get differential regions and summits 
+
+#in R
+
+#extract differential regions 
+```{r}
+
+library(GenomicRanges)
+
+setwd("cuttag_dir/")
+
+#dir.create("TF_motif_analysis")
+
+analysis <- "hyperacetylated" 
+H3K27ac_name <- "FOXA2_vs_NEUN_annotated"
+DEG_dir <- "cuttag_dir/DEG_FOXA2_vs_NEUN/"
+summit <- read.table("cuttag_dir/peak_calling/human_control_FOXA2_all.narrow.1e-5.macs2_summits.bed")
+summit_control <- read.table("cuttag_dir/peak_calling/human_control_NEUN_all.narrow.1e-5.macs2_summits.bed")
+
+DEG <- read.csv(paste0(DEG_dir, H3K27ac_name, ".csv"))
+
+DEG <- DEG[DEG$logFC > 0, ]
+
+DEG_sub <- DEG[DEG$FDR < 0.05, ]
+
+gr_h3k27ac <- GRanges(seqnames = DEG_sub$metadata.Chr,
+                      ranges = IRanges(start = DEG_sub$metadata.Start, end = DEG_sub$metadata.End, peak = DEG_sub$metadata.Geneid))
+
+gr_summit <- GRanges(seqnames = summit$V1,
+                   ranges = IRanges(start = summit$V2, end = summit$V3, peak = summit$V4),
+                   metadata = summit[, -c(1,2,3,4)])  
+
+
+# Perform overlap analysis
+overlap <- findOverlaps(gr_summit, gr_h3k27ac)
+
+overlapping_summit_peaks <- gr_summit[queryHits(overlap)]
+
+extended_summits_peaks <- resize(overlapping_summit_peaks, width = 400, fix = "center") #extend summit +/- 200bp each side 
+
+extended_summits <- as.data.frame(extended_summits_peaks)
+
+filename <- paste("extended_summits_", analysis, "_", H3K27ac_name,".bed", sep="")
+
+# Write to BED
+write.table(
+  extended_summits,
+  file = filename,
+  quote = FALSE,
+  sep = "\t",
+  row.names = FALSE,
+  col.names = FALSE
+)
+
+```
+
+
+BACKGROUND
+```{r}
+
+all_peaks <- read.csv(paste0(DEG_dir, H3K27ac_name, ".csv"))
+
+gr_all <- GRanges(seqnames = all_peaks$metadata.Chr,
+                      ranges = IRanges(start = all_peaks$metadata.Start, end = all_peaks$metadata.End, peak = all_peaks$metadata.Geneid))
+
+summit1 <- summit
+summit2 <- summit_control
+
+combined_summits <- rbind(summit1, summit2)
+
+gr_combined_summits <- GRanges(seqnames = combined_summits$V1, ranges = IRanges(start = combined_summits$V2, end = combined_summits$V3, peak = combined_summits$V4))
+
+overlap_bg <- findOverlaps(gr_combined_summits, gr_all)
+overlapping_summits_bg <- gr_combined_summits[queryHits(overlap_bg)]
+
+extended_bg_summits<- resize(overlapping_summits_bg, width = 400, fix = "center") #extend summit +/- 200bp each side 
+
+extended_bg_summits_df <- as.data.frame(extended_bg_summits)
+
+filename <- paste("extended_bg_summits_", H3K27ac_name,".bed", sep="")
+
+# Write to BED
+write.table(
+  extended_bg_summits_df,
+  file = filename,
+  quote = FALSE,
+  sep = "\t",
+  row.names = FALSE,
+  col.names = FALSE
+)
+
+```
+
+2. Run homer
+############################################################################################################ below in bash
+
+#!/bin/bash
+#PBS -l walltime=08:00:00
+#PBS -l select=1:ncpus=2:mem=8gb
+#PBS -j oe
+#PBS -N HOMER_TF_enrichment
+#PBS -o HOMER_TF_enrichment.log
+
+# Load necessary modules
+module load anaconda3/personal
+source activate base
+
+
+
+cd cuttag_dir/TF_motif_analysis
+#1 A) FOXA2 vs NEUN
+
+findMotifsGenome.pl cuttag_dir/TF_motif_analysis/extended_summits_hyperacetylated_FOXA2_vs_NEUN_annotated.bed \
+hg38 \
+cuttag_dir/TF_motif_analysis/FOXA2_vs_NEUN_summits \
+-size given \
+-bg cuttag_dir/TF_motif_analysis/extended_bg_summits_FOXA2_vs_NEUN_annotated.bed
+
+
+############################################################################################################ in R
+
+
+3. Identify TFs matching to motifs 
+
+Step A)
+```{r}
+library(GenomicRanges)
+library(org.Hs.eg.db)
+library(ChIPseeker)
+library(TxDb.Hsapiens.UCSC.hg38.knownGene)
+library(ggplot2)
+library(patchwork)
+library(ggplot2)
+library(dplyr)
+library(ggrepel)
+library(pheatmap)
+library(here)
+library(MotifDb)
+library(seqLogo)
+library(ggseqlogo)
+library(TFBSTools)
+library(universalmotif)
+library(tools)
+library(jsonlite)
+library(tidyr)
+library(edgeR)
+library(reshape2)
+```
+
+Set working directory 
+```{r}
+setwd("cuttag_dir/TF_motif_analysis/FOXA2_vs_NEUN_summits/summary/")
+```
+
+
+Read in homer file and convert it to meme format 
+```{r}
+
+motif <- read_homer("cuttag_dir/TF_motif_analysis/FOXA2_vs_NEUN_summits/homerMotifs.all.motifs")
+
+#convert to meme format for tomtom
+write_meme(motif, "cuttag_dir/TF_motif_analysis/FOXA2_vs_NEUN_summits/homerMotifs.all.meme")
+```
+
+Read in homer results from homerMotifs.all.motifs file for processing 
+```{r}
+# Define the file path
+file_path <- "cuttag_dir/TF_motif_analysis/FOXA2_vs_NEUN_summits/homerMotifs.all.motifs"
+
+extract_motif_info <- function(line) {
+  parts <- strsplit(line, "\t")[[1]]
+  homer_name <- parts[2]
+  homer_p_value <- as.numeric(sub(".*P:", "", parts[6]))
+  
+  # Extract T and B percentages
+  TB_info <- sub(".*T:(.*),B:(.*),P:.*", "\\1,\\2", parts[6])
+  TB_parts <- strsplit(TB_info, ",")[[1]]
+  homer_T_percent <- as.numeric(sub(".*\\((.*)%\\).*", "\\1", TB_parts[1]))
+  homer_B_percent <- as.numeric(sub(".*\\((.*)%\\).*", "\\1", TB_parts[2]))
+  
+  return(data.frame(homer_name = homer_name, homer_p_value = homer_p_value, homer_T_percent = homer_T_percent, homer_B_percent = homer_B_percent, stringsAsFactors = FALSE))
+}
+
+# Initialize a list to store the motif details
+motif_details <- list()
+
+# Read the file line by line
+con <- file(file_path, "r")
+while (TRUE) {
+  line <- readLines(con, n = 1)
+  if (length(line) == 0) break
+  
+  # Check if the line starts with '>'
+  if (grepl("^>", line)) {
+    motif_details <- c(motif_details, list(extract_motif_info(line)))
+  }
+}
+close(con)
+
+# Combine the list of data frames into a single data frame
+motif_summary <- do.call(rbind, motif_details)
+
+# Display the summary table
+print(motif_summary)
+
+#calculate FDR
+motif_summary$homer_fdr <- p.adjust(motif_summary$homer_p_value, method = 'fdr')
+
+#calculate FC & LOGFC (target / background )
+motif_summary$homer_FC <- motif_summary$homer_T_percent / motif_summary$homer_B_percent
+motif_summary$homer_log2FC <- log2(motif_summary$homer_T_percent / motif_summary$homer_B_percent)
+
+
+
+#filtered out what is not significant 
+filtered_homer <- motif_summary[motif_summary$homer_fdr < 0.05, ]
+
+```
+
+Using tomtom with hocomoco12 to find matches for the homer discovered motifs
+its same input for mouse and human - just use mouse annotation if you want to map these
+```
+Run in terminal with tomtom (meme suite)
+tomtom homerMotifs.all.meme /Janis/databases/TF_motifs_human/H13CORE_meme_format.meme -o homerMotifs.all
+```
+
+Reading in all the hits where q.value of match is below 0.05
+
+Read in tomtom results 
+```{r}
+#read in
+tomtom <- read.table("cuttag_dir/TF_motif_analysis/FOXA2_vs_NEUN_summits/homerMotifs.all/tomtom.tsv", header = TRUE)
+
+#filter based on q-value
+filtered_tomtom <- tomtom[tomtom$q.value < 0.05, ]
+
+# Merge filtered_tomtom with filtered_homer based on Query_ID and name
+filtered_homer_tomtom <- merge(filtered_tomtom, filtered_homer, by.x = "Query_ID", by.y = "homer_name", all.x = TRUE)
+
+filtered_homer_tomtom
+```
+
+#checking of TFs are expressed in cell type of interest using RNA-seq data
+
+1. Get the entrez ids 
+```{r}
+#Map it to entrez - via tomtom documentation 
+jsonl_file_path <- "/rds/general/user/jlt121/projects/epinott/live/user_analysed_data/Janis/databases/TF_motifs_human/H13CORE_annotation.jsonl"
+
+# Read the JSON Lines file into a data frame
+jsonl_data <- stream_in(file(jsonl_file_path, "r"))
+
+jsonl_data_flat <- flatten(jsonl_data)
+
+entrez <- jsonl_data_flat %>%
+  dplyr::select(name = name, entrez_id = "masterlist_info.species.HUMAN.entrez", mouse_gene_symbol = "masterlist_info.species.HUMAN.gene_symbol")
+
+filtered_homer_tomtom_entrez <- merge(filtered_homer_tomtom, entrez, by.x = "Target_ID", by.y = "name", all.x = TRUE)
+
+# Ensure all entries in entrez_id are converted to strings
+filtered_homer_tomtom_entrez$entrez_id <- sapply(filtered_homer_tomtom_entrez$entrez_id, function(x) {
+  if (is.null(x) || length(x) == 0) {
+    return(NA)  # Replace empty entries with NA
+  } else {
+    return(paste(x, collapse = ","))  # Collapse multiple values into a single string
+  }
+})
+
+write.table(filtered_homer_tomtom_entrez, file = "homerMotifs_tomtom_entrez_TF_FOXA2.tsv", sep = "\t", row.names = FALSE, quote = FALSE)
+```
+
+Step B)
+```{r}
+TF_summary <- read.delim("homerMotifs_tomtom_entrez_TF_FOXA2.tsv")
+
+#will not filter on expression for this dataset - snRNA-seq data too sparse and CUT&Tag not ideal for annotating promoters 
+
+# Remove rows with NA in expression_status column
+TF_summary_expression_data_filtered <- TF_summary
+```
+
+Remove all TFs which are not expressed
+```{r}
+# Filter the dataframe to keep only rows where h3k4me3_peak_at_TSS is "yes"
+filtered_data <- TF_summary
+
+#order by qvalue
+ordered_data <- filtered_data %>%
+  arrange(q.value)
+
+# View the ordered data
+head(ordered_data)
+```
+
+creating summary table and identifying best match
+
+```{r}
+# Load necessary library
+library(dplyr)
+
+# Assuming your data is stored in a CSV file, read it into R
+data <- ordered_data
+
+# Step 1: Find the minimum p.value for each Target_ID
+best_matches <- data %>%
+  group_by(mouse_gene_symbol) %>%
+  filter(q.value == min(q.value)) %>%
+  ungroup()
+
+# Remove duplicates based on SYMBOL, retaining only the row with the best (minimum) q.value
+best_matches_unique <- best_matches %>%
+  group_by(mouse_gene_symbol) %>%
+  filter(row_number() == 1) %>%
+  ungroup()
+
+# Step 2: Assign each Target_ID to its best Query_ID and summarize
+summary_table <- best_matches_unique %>%
+  group_by(Query_ID) %>%
+  summarise(
+    Matched_Target_IDs = paste(mouse_gene_symbol, collapse = ", "),
+    tomtom_qvalue = paste(q.value, collapse = ", "),
+    tomtom_evalue = paste(E.value, collapse = ", ")
+  )
+
+
+# The Homer_FDR for a Query_ID is the smallest q.value from the filtered data
+query_homer_fdr <- data %>%
+  group_by(Query_ID) %>%
+  summarise(
+    Homer_FDR = min(homer_fdr),
+    .groups = 'drop'
+  )
+
+# Step 5: Merge the Homer_FDR values into the summary table
+final_summary_table <- summary_table %>%
+  left_join(query_homer_fdr, by = "Query_ID")
+
+final_summary_table <- final_summary_table %>%
+  mutate(Homer_FDR = as.numeric(Homer_FDR)) %>%  # Convert Homer_FDR to numeric
+  arrange(Homer_FDR)  # Sort the table in ascending order
+
+final_summary_table <- final_summary_table %>%
+  mutate(Homer_FDR = format(Homer_FDR, scientific = TRUE, digits = 3))
+
+library(knitr)
+library(rmarkdown)
+
+table<-kable(final_summary_table, format="markdown")
+cat(table, sep="\n", file="summarytable_motifs.Rmd")
+render("summarytable_motifs.Rmd", output_format = "html_document")
+
+write.csv(filtered_data, "expression_filtered_TF_summary.csv")
+
+```
+
+
+
+

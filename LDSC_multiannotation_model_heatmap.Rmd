@@ -1,0 +1,233 @@
+---
+title: "Plot -	multi-annotation joint model LDSC"
+output: html_notebook
+---
+
+##load libraries 
+
+```{r}
+library(dplyr)
+library(reshape2)
+library(viridis)
+library(ggplot2)
+library(here)
+
+```
+
+Load the working directory 
+```{r}
+
+
+# Set the root directory for notebook chunks
+
+setwd("/ldsc/heatmaps_final/")
+
+out_dir <- (file.path("/ldsc/heatmaps_final/"))
+
+
+output_file_path <- (file.path(root_dir, "ldsc/heatmaps/24.04.2025_all_cell_types_mouse_multiannotation_model.txt"))
+
+```
+
+Get data and preparation - update the cell types and GWAS manually 
+```{r}
+#preparing data for heatmap
+
+#directory 
+dir<- (file.path(root_dir, "ldsc/heritability_final/"))
+
+
+
+#names need to be changed manually currently  
+type<-c('AD_Jan', 'PD_nalls_no23_r_py_2', 'PD_GP2', 'SCZ_PardinasInfo9', 'MS_Andlauer', 'ALS_rheenen')
+
+cell_type <- c(
+'FOXA2_final_mouse_peaks_noXYrandom.mm10tohg19',
+'NEUN_final_mouse_peaks_noXYrandom.mm10tohg19',
+'OLIG2_final_mouse_peaks_noXYrandom.mm10tohg19')
+
+
+custom_order <- paste0(cell_type)
+
+# Initialize list for all datasets
+trait_data_list <- list()
+for (t in seq_along(type)) {
+  # Read result file
+  read <- read.table(file = paste0(dir, type[t], "_24.04.2025_all_cell_types_mouse_cell_types.results"), sep = "\t", header = TRUE)
+  
+  # Subset the rows (MODIFY as needed)
+  read <- read[98:100, ]  # this assumes rows 98:100 are the three cell types
+  
+  # Add cell type annotation
+  read$ordering <- custom_order
+  read$CellType <- custom_order
+  
+  # Calculate one-sided p-values for positive enrichment
+  read$Coefficient_p <- pnorm(read$Coefficient_z.score, lower.tail = FALSE)
+  read$Coefficient_p_FDR <- p.adjust(read$Coefficient_p, method = "BH")
+  read$Coefficient_p_BF <- p.adjust(read$Coefficient_p, method = "bonferroni")
+  read$log10_Coefficient_p <- round(-log10(read$Coefficient_p), 5)
+  read$log10_Coefficient_p[read$Coefficient < 0] <- 0  # Mask negatives
+  
+  # Tag with disease label
+  read$type <- type[t]
+  
+  # Store in list
+  trait_data_list[[type[t]]] <- read
+}
+
+# Optional renaming
+AD <- trait_data_list[["AD_Jan"]]
+PD_nalls <- trait_data_list[["PD_nalls_no23_r_py_2"]]
+PD_GP2 <- trait_data_list[["PD_GP2"]]
+SCZ <- trait_data_list[["SCZ_PardinasInfo9"]]
+MS <- trait_data_list[["MS_Andlauer"]]
+ALS <- trait_data_list[["ALS_rheenen"]]
+
+# Combine into one data frame
+DIS <- bind_rows(AD, PD_nalls, PD_GP2, SCZ, MS, ALS)
+
+#save
+write.table(x = DIS, file = output_file_path, sep="\t", quote = F, col.names = T, row.names = F)
+```
+
+Generate the heatmap for ldsc results 
+- update the data 
+```{r}
+library(viridis)
+library(pheatmap)
+
+dir<-"/ldsc/heatmaps_final/"
+date <- "_24.04.2025_all_cell_types_mouse_cell_types"
+#read in the data 
+
+
+ldsc_data <- read.table(file = output_file_path, header = TRUE, sep = "\t", stringsAsFactors = FALSE)
+
+
+#modifying the label names
+relabel_rules <- c("AD_Jan" = "AD",
+                   "PD_nalls_no23_r_py_2" ="PD_nalls",
+                   "PD_GP2" = "PD_GP2",
+                   "ALS_rheenen" = "ALS",
+                   "MS_Andlauer" = "MS",
+                   "SCZ_PardinasInfo9" = "SCZ"
+                   )
+
+
+
+ldsc_data <- ldsc_data %>% mutate(type = ifelse(type %in% names(relabel_rules), relabel_rules[type], type))
+
+# Pivot the data frame to convert it into a matrix-like structure
+ldsc_matrix <- reshape2::dcast(ldsc_data, ordering ~ type, value.var = "log10_Coefficient_p", fill = 0)
+
+# Set the row names to the "ordering" column
+row.names(ldsc_matrix) <- ldsc_matrix$ordering
+
+# Define the new order of the columns
+new_order <- c("AD", "PD_nalls", "PD_GP2", "MS", "ALS", "SCZ")
+
+# Subset the ldsc_matrix using the new order
+ldsc_matrix <- ldsc_matrix[, new_order]
+
+# Convert to matrix
+ldsc_matrix <- as.matrix(ldsc_matrix)
+
+# Reshape the matrix for plotting with ggplot2
+ldsc_melt <- reshape2::melt(ldsc_matrix)
+
+#create the row annotations 
+
+row_labels <- rownames(ldsc_matrix)  # Cell types
+col_labels <- colnames(ldsc_matrix)  # Disease types
+
+diseases <- c(colnames(ldsc_matrix))
+cell_type <- c(rownames(ldsc_matrix))
+
+ann_row <- data.frame(cell_type)
+row.names(ann_row) <- ann_row$cell_type
+
+ann_col <- data.frame(diseases)
+row.names(ann_col) <- ann_col$diseases
+
+disease_colors <- c("AD" = "#F8F6F7",
+                    "PD" = "#009E73",
+                    "MS" = "#0072B2",
+                    "ALS" = "#785594",
+                    "SCZ" = "#785594",
+                    "PD_GP2" = "#785594")
+
+  
+ldsc_data$star_mark <- ""
+
+# FDR-based stars
+ldsc_data$star_mark[ldsc_data$Coefficient_p_BF < 0.05] <- "*"
+ldsc_data$star_mark[ldsc_data$Coefficient_p_BF < 0.01] <- "**"
+ldsc_data$star_mark[ldsc_data$Coefficient_p_BF < 0.001] <- "***"
+
+
+# Create matrix
+# Text (stars)
+star_matrix <- reshape2::dcast(ldsc_data, ordering ~ type, value.var = "star_mark", fill = "")
+row.names(star_matrix) <- star_matrix$ordering
+star_matrix <- star_matrix[, new_order]
+star_matrix <- as.matrix(star_matrix)
+
+# Define your exact row names (must match rownames(ldsc_matrix))
+row_labels <- rownames(ldsc_matrix)
+
+
+# Manually assign a color to each
+row_color_map <- c(
+  "FOXA2_final_mouse_peaks_noXYrandom.mm10tohg19" = "#B8A5C5",  # purple
+  "OLIG2_final_mouse_peaks_noXYrandom.mm10tohg19" = "#7CB4D4",  # blue
+  "NEUN_final_mouse_peaks_noXYrandom.mm10tohg19"  = "#7CCAB5"  # green
+)
+
+# Create row annotation using the rownames
+ann_row <- data.frame(Source = row_labels)
+rownames(ann_row) <- row_labels
+
+# Assign colors
+ann_colors <- list(Source = row_color_map)
+
+
+# Define a custom color ramp with white, light green, bright green, and dark green
+custom_colors <- colorRampPalette(c("#FFFFFF","#CEDAA4", "#C1D189", "#96A28F", "#354E28"))(10) 
+
+gp_row <- which(diff(as.numeric(factor(ann_row$Source))) != 0)
+gp_col = which(diff(as.numeric(factor(ann_col$diseases)))!=0)
+
+library(pheatmap)
+
+pdf(file.path(dir, "heatmap_24.04.2025_all_cell_types_mouse_cell_types_multiannotation_model_BF_significance.pdf"), height = 20, width = 20)
+
+heatmap <- pheatmap(ldsc_matrix,
+         color = custom_colors,
+         breaks = seq(0, 5, length.out = 11),    # Cap max at 10
+         legend_breaks = seq(0, 10, 2),  
+         cluster_rows = FALSE,
+         cluster_cols = FALSE,
+         display_numbers = star_matrix,
+         number_color = "black",
+         fontsize_number = 16,
+         fontsize_row = 0,
+         fontsize_col = 12,
+         annotation_row = ann_row,
+         annotation_colors = ann_colors,
+         main = "-log10(Coefficient p) (Stars = BF. sig)",
+         border_color = "darkgrey",
+         gaps_row = gp_row,
+         gaps_col = gp_col,
+         show_rownames = FALSE,
+         cellwidth = 30,
+         cellheight = 30)
+
+print(heatmap)
+dev.off()
+
+
+
+print(heatmap)
+
+```

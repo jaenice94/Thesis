@@ -1,0 +1,317 @@
+---
+title: "DEG_CUTTAG"
+output: html_notebook
+---
+
+250303 - Janis
+
+```{r}
+# Load required libraries
+library(edgeR)
+library(dplyr)
+library(DESeq2)
+library(GenomicRanges)
+library(org.Hs.eg.db)
+library(ChIPseeker)
+library(TxDb.Hsapiens.UCSC.hg38.knownGene)
+library(pheatmap)
+library(ggplot2)
+library(viridis)
+library(fgsea)
+```
+
+FOR ALL THREE CELL TYPES:
+
+
+######ANNOTATE TO GENES######
+```{r}
+library(edgeR)
+
+# Define base directory
+base_dir <- "dir"
+setwd(base_dir)
+
+# Create DEG directory if it doesn't exist
+deg_dir <- file.path(base_dir, "DEG")
+if (!dir.exists(deg_dir)) {
+  dir.create(deg_dir)
+}
+
+# File paths
+counts_file <- file.path(base_dir, "featurecounts/All_samples_counts.txt")
+
+# Read FeatureCounts file
+counts <- read.table(counts_file, header = TRUE)
+
+
+
+
+# Clean column names
+colnames(counts) <- gsub(".*{sample_prefix}.|.dedup.q30.no_blacklist.bam", "", colnames(counts))
+
+# Extract counts data
+counts_data <- counts[-c(1:6)]
+
+# Identify chromosome column (adjust if needed)
+chr_column <- counts$Chr  # Ensure "Chr" is the correct column
+
+# Exclude X and Y chromosomes
+valid_rows <- !chr_column %in% c("chrX", "chrY")
+filtered_counts_data <- counts_data[valid_rows, ]  # Keep only autosomes
+filtered_counts <- counts[valid_rows, ]  # Keep annotation metadata
+
+#confirm removal
+chr_column <- filtered_counts$Chr  
+print(table(chr_column))  # Should no longer show X and Y
+
+
+# Create GRanges object
+granges_object <- GRanges(
+  seqnames = Rle(counts$Chr),
+  ranges = IRanges(start = counts$Start, end = counts$End),
+  metadata = counts
+)
+
+# Annotate peaks
+txdb <- TxDb.Hsapiens.UCSC.hg38.knownGene
+annotated_peaks <- annotatePeak(granges_object, tssRegion = c(-2000, 500), 
+                                TxDb = txdb, assignGenomicAnnotation = TRUE, 
+                                annoDb = "org.Hs.eg.db", verbose = TRUE)
+
+# Convert annotations to dataframe
+all_peaks_annotated <- as.data.frame(annotated_peaks@anno@elementMetadata)
+
+# Function to match and annotate DE results
+get_genes_and_annotations <- function(deg, annotations) {
+  matched_idx <- match(rownames(deg), rownames(annotations))
+  cols <- c("SYMBOL", "ENSEMBL", "metadata.Geneid", "annotation", "distanceToTSS",
+            "metadata.Chr", "metadata.Start", "metadata.End")
+  deg[cols] <- annotations[matched_idx, cols]
+  return(deg)
+}
+
+```
+
+
+
+######ADD METADATA######
+```{r}
+
+sample_metadata <- read.delim("sample_metadata.tsv", sep="\t")
+
+```
+
+
+```{r}
+
+counts_data <- filtered_counts_data
+
+print(colnames(counts_data))
+
+# Create DGEList object
+d <- DGEList(counts = counts_data)
+
+# Estimate library sizes and normalization factors
+d <- calcNormFactors(d, method = "TMM")
+
+# Filtering lowly expressed genes
+keep <- rowSums(cpm(d) > 1) >= 2
+d <- d[keep,]
+
+
+
+# Ensure metadata matches counts_data column order
+sample_metadata <- sample_metadata[match(colnames(counts_data), sample_metadata$Sample), ]
+
+design <- model.matrix(~ 0 + Cell_Type + Donor, data = sample_metadata)
+
+d <- estimateDisp(d, design, robust = TRUE)
+```
+
+```{r}
+  # Fit generalized linear model with Quasi-Likelihood F-test
+fit <- glmQLFit(d, design, robust = TRUE)
+
+my.contrast <- makeContrasts(
+  FOXA2_vs_others = Cell_TypeFOXA2 - (Cell_TypeNEUN + Cell_TypeOLIG2)/2, 
+  NEUN_vs_others = Cell_TypeNEUN - (Cell_TypeFOXA2 + Cell_TypeOLIG2)/2,
+  OLIG2_vs_others = Cell_TypeOLIG2 - (Cell_TypeFOXA2 + Cell_TypeNEUN)/2,
+  levels = design
+)
+
+# Run DE analysis
+deg_list <- list(
+  FOXA2_vs_others = glmQLFTest(fit, contrast=my.contrast[,"FOXA2_vs_others"]),
+  NEUN_vs_others = glmQLFTest(fit, contrast=my.contrast[,"NEUN_vs_others"]),
+  OLIG2_vs_others = glmQLFTest(fit, contrast=my.contrast[,"OLIG2_vs_others"])
+)
+
+# Function to extract top DE genes
+filter_top_tags <- function(results) {
+  return(as.data.frame(topTags(results, n = Inf)))
+}
+
+# Apply function to all DE results
+deg_df_list <- lapply(deg_list, filter_top_tags)
+
+
+  # Annotate all DE results in one loop
+for (contrast in names(deg_df_list)) {
+  deg_df_list[[contrast]] <- get_genes_and_annotations(deg_df_list[[contrast]], all_peaks_annotated)
+  write.csv(deg_df_list[[contrast]], file = file.path(deg_dir, paste0( contrast, "_annotated.csv")), row.names = FALSE)
+}
+
+```
+
+FOR NEUN VS FOXA2 ONLY:
+
+######ANNOTATE TO GENES######
+```{r}
+library(edgeR)
+
+# Define base directory
+base_dir <- "dir"
+setwd(base_dir)
+
+# Create DEG directory if it doesn't exist
+deg_dir <- file.path(base_dir, "DEG_FOXA2_vs_NEUN")
+if (!dir.exists(deg_dir)) {
+  dir.create(deg_dir)
+}
+
+# File paths
+counts_file <- file.path(base_dir, "DEG_FOXA2_vs_NEUN/All_samples_counts.txt")
+
+# Read FeatureCounts file
+counts <- read.table(counts_file, header = TRUE)
+
+rownames(counts) <- counts$Geneid
+
+
+# Clean column names
+colnames(counts) <- gsub(".*{sample_prefix}.|.dedup.q30.no_blacklist.bam", "", colnames(counts))
+
+# Extract counts data
+counts_data <- counts[-c(1:6)]
+
+# Identify chromosome column (adjust if needed)
+chr_column <- counts$Chr  # Ensure "Chr" is the correct column
+
+# Exclude X and Y chromosomes
+valid_rows <- !chr_column %in% c("chrX", "chrY")
+filtered_counts_data <- counts_data[valid_rows, ]  # Keep only autosomes
+filtered_counts <- counts[valid_rows, ]  # Keep annotation metadata
+
+#confirm removal
+chr_column <- filtered_counts$Chr  
+print(table(chr_column))  # Should no longer show X and Y
+
+
+# Create GRanges object
+granges_object <- GRanges(
+  seqnames = Rle(counts$Chr),
+  ranges = IRanges(start = counts$Start, end = counts$End),
+  metadata = counts
+)
+
+# Annotate peaks
+txdb <- TxDb.Hsapiens.UCSC.hg38.knownGene
+annotated_peaks <- annotatePeak(granges_object, tssRegion = c(-2000, 500), 
+                                TxDb = txdb, assignGenomicAnnotation = TRUE, 
+                                annoDb = "org.Hs.eg.db", verbose = TRUE)
+
+# Convert annotations to dataframe
+all_peaks_annotated <- as.data.frame(annotated_peaks@anno@elementMetadata)
+
+rownames(all_peaks_annotated) <- all_peaks_annotated$metadata.Geneid
+
+# Function to match and annotate DE results
+get_genes_and_annotations <- function(deg, annotations) {
+  matched_idx <- match(rownames(deg), rownames(annotations))
+  cols <- c("SYMBOL", "ENSEMBL", "metadata.Geneid", "annotation", "distanceToTSS",
+            "metadata.Chr", "metadata.Start", "metadata.End")
+  deg[cols] <- annotations[matched_idx, cols]
+  return(deg)
+}
+
+```
+
+
+
+######ADD METADATA######
+```{r}
+
+sample_metadata <- read.delim("sample_metadata.tsv", sep="\t")
+
+```
+
+
+```{r}
+
+counts_data <- filtered_counts_data
+
+print(colnames(counts_data))
+
+# Create DGEList object
+d <- DGEList(counts = counts_data)
+
+# Filtering lowly expressed genes
+keep <- rowSums(cpm(d) > 1) >= 2
+d <- d[keep,]
+
+# Estimate library sizes and normalization factors
+d <- calcNormFactors(d, method = "TMM")
+
+
+# Ensure metadata matches counts_data column order
+sample_metadata <- sample_metadata[match(colnames(counts_data), sample_metadata$Sample), ]
+
+sample_metadata$Donor <- factor(sample_metadata$Donor)
+sample_metadata$Cell_Type <- factor(sample_metadata$Cell_Type)
+
+
+design <- model.matrix(~ 0 + Cell_Type + Donor, data = sample_metadata)
+
+d <- estimateDisp(d, design, robust = TRUE)
+
+# Scale counts to CPM (counts per million) using TMM-normalized library sizes
+scaled_counts <- cpm(d, normalized.lib.sizes = TRUE)
+
+  # Fit generalized linear model with Quasi-Likelihood F-test
+fit <- glmQLFit(d, design, robust = TRUE)
+```
+
+```{r}
+logCPM <- cpm(d, log = TRUE, prior.count = 1)
+```
+
+```{r}
+my.contrast <- makeContrasts(
+  FOXA2_vs_NEUN = Cell_TypeFOXA2 - Cell_TypeNEUN,
+  NEUN_vs_FOXA2 = Cell_TypeNEUN - Cell_TypeFOXA2,
+  levels = design
+)
+
+# Run DE analysis
+deg_list <- list(
+  FOXA2_vs_NEUN = glmQLFTest(fit, contrast=my.contrast[,"FOXA2_vs_NEUN"]),
+  NEUN_vs_FOXA2 = glmQLFTest(fit, contrast=my.contrast[,"NEUN_vs_FOXA2"]))
+
+# Function to extract top DE genes
+filter_top_tags <- function(results) {
+  return(as.data.frame(topTags(results, n = Inf)))
+}
+
+# Apply function to all DE results
+deg_df_list <- lapply(deg_list, filter_top_tags)
+
+
+  # Annotate all DE results in one loop
+for (contrast in names(deg_df_list)) {
+  deg_df_list[[contrast]] <- get_genes_and_annotations(deg_df_list[[contrast]], all_peaks_annotated)
+  write.csv(deg_df_list[[contrast]], file = file.path(deg_dir, paste0( contrast, "_annotated.csv")), row.names = FALSE)
+}
+
+```
+
+

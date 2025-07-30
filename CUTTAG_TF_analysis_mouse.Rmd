@@ -1,0 +1,916 @@
+---
+title: "TF analysis in Mouse"
+output: html_notebook
+---
+
+Janis
+
+
+########### 1. Get differential region and ATAC overlap
+
+```{r}
+library(GenomicRanges)
+```
+
+
+```{r}
+setwd("cuttag_dir/TF_motif_analysis/")
+
+H3K27ac_name <- "DEG_peaks_FOXA2_vs_NEUN"
+
+DEG <- read.csv("cuttag_dir/DEG_FOXA2_vs_NEUN/deg_FOXA2_vs_NEUN_annotated.csv")
+
+DEG <- DEG[DEG$logFC > 0, ]
+
+DEG_sub <- DEG[DEG$FDR < 0.05, ]
+
+gr_h3k27ac <- GRanges(seqnames = DEG_sub$metadata.Chr,
+                      ranges = IRanges(start = DEG_sub$metadata.Start, end = DEG_sub$metadata.End, peak = DEG_sub$metadata.Geneid))
+
+atac <- read.table("atac_dir/peak_calling/FOXA2_confidence_peaks.sorted.bed")
+
+gr_atac <- GRanges(seqnames = atac$V1,
+                   ranges = IRanges(start = atac$V2, end = atac$V3, peak = atac$V4),
+                   metadata = atac[, -c(1,2,3,4)])  # Assuming you have additional columns, if not, remove this.
+
+
+# Perform overlap analysis
+overlap <- findOverlaps(gr_atac, gr_h3k27ac)
+
+overlapping_atac_peaks <- gr_atac[queryHits(overlap)]
+
+olap_atac <- as.data.frame(overlapping_atac_peaks)
+
+filename <- paste("overlapping_atac_peaks_", H3K27ac_name,".bed", sep="")
+
+# Write to BED
+write.table(
+  olap_atac,
+  file = filename,
+  quote = FALSE,
+  sep = "\t",
+  row.names = FALSE,
+  col.names = FALSE
+)
+
+```
+
+
+2. Run Homer
+################################# in bash: 
+
+
+#!/bin/bash
+#PBS -l walltime=08:00:00
+#PBS -l select=1:ncpus=2:mem=8gb
+#PBS -j oe
+#PBS -N HOMER_TF_enrichment_analysis
+#PBS -o HOMER_TF_enrichment_analysis.log
+
+# Load necessary modules
+module load anaconda3/personal
+source activate base
+
+#background used is consensus atac file from both NEUN + FOXA2 ATAC-peaks
+
+ID="{analysis_ID}"
+   # Run findMotifsGenome.pl
+findMotifsGenome.pl /cuttag_dir/$ID/TF_motif_analysis/overlapping_atac_peaks_DEG_peaks_FOXA2_vs_NEUN.bed mm10 /cuttag_dir/$ID/TF_motif_analysis/ATAC_overlap_DEG_FOXA2_vs_NEUN/ -size given -bg /cuttag_dir/$ID/TF_motif_analysis/ATAC_consensus_peaks_FOXA2_NEUN.bed
+
+3. match to TFs
+################################# in bash: 
+
+
+Loading libraries 
+```{r}
+library(GenomicRanges)
+library(org.Hs.eg.db)
+library(ChIPseeker)
+library(TxDb.Hsapiens.UCSC.hg38.knownGene)
+library(ggplot2)
+library(patchwork)
+library(ggplot2)
+library(dplyr)
+library(ggrepel)
+library(pheatmap)
+library(here)
+library(MotifDb)
+library(seqLogo)
+library(ggseqlogo)
+library(TFBSTools)
+library(universalmotif)
+library(tools)
+library(jsonlite)
+library(tidyr)
+library(edgeR)
+library(reshape2)
+```
+
+Set working directory 
+```{r}
+setwd("/cuttag_dir/TF_motif_analysis/ATAC_overlap_DEG_FOXA2_vs_NEUN/summary/")
+```
+
+
+Read in homer file and convert it to meme format 
+```{r}
+
+motif <- read_homer("/cuttag_dir/TF_motif_analysis/ATAC_overlap_DEG_FOXA2_vs_NEUN/homerMotifs.all.motifs")
+
+#convert to meme format for tomtom
+write_meme(motif, "/cuttag_dir/TF_motif_analysis/ATAC_overlap_DEG_FOXA2_vs_NEUN/homerMotifs.all.meme")
+```
+
+Read in homer results from homerMotifs.all.motifs file for processing 
+```{r}
+# Define the file path
+file_path <- "/cuttag_dir/TF_motif_analysis/ATAC_overlap_DEG_FOXA2_vs_NEUN/homerMotifs.all.motifs"
+
+extract_motif_info <- function(line) {
+  parts <- strsplit(line, "\t")[[1]]
+  homer_name <- parts[2]
+  homer_p_value <- as.numeric(sub(".*P:", "", parts[6]))
+  
+  # Extract T and B percentages
+  TB_info <- sub(".*T:(.*),B:(.*),P:.*", "\\1,\\2", parts[6])
+  TB_parts <- strsplit(TB_info, ",")[[1]]
+  homer_T_percent <- as.numeric(sub(".*\\((.*)%\\).*", "\\1", TB_parts[1]))
+  homer_B_percent <- as.numeric(sub(".*\\((.*)%\\).*", "\\1", TB_parts[2]))
+  
+  return(data.frame(homer_name = homer_name, homer_p_value = homer_p_value, homer_T_percent = homer_T_percent, homer_B_percent = homer_B_percent, stringsAsFactors = FALSE))
+}
+
+# Initialize a list to store the motif details
+motif_details <- list()
+
+# Read the file line by line
+con <- file(file_path, "r")
+while (TRUE) {
+  line <- readLines(con, n = 1)
+  if (length(line) == 0) break
+  
+  # Check if the line starts with '>'
+  if (grepl("^>", line)) {
+    motif_details <- c(motif_details, list(extract_motif_info(line)))
+  }
+}
+close(con)
+
+# Combine the list of data frames into a single data frame
+motif_summary <- do.call(rbind, motif_details)
+
+# Display the summary table
+print(motif_summary)
+
+#calculate FDR
+motif_summary$homer_fdr <- p.adjust(motif_summary$homer_p_value, method = 'fdr')
+
+#calculate FC & LOGFC (target / background )
+motif_summary$homer_FC <- motif_summary$homer_T_percent / motif_summary$homer_B_percent
+motif_summary$homer_log2FC <- log2(motif_summary$homer_T_percent / motif_summary$homer_B_percent)
+
+
+
+#filtered out what is not significant 
+filtered_homer <- motif_summary[motif_summary$homer_fdr < 0.05, ]
+
+```
+
+Using tomtom with hocomoco12 to find matches for the homer discovered motifs
+its same input for mouse and human - just use mouse annotation if you want to map these
+```
+Run in terminal with tomtom (meme suite)
+tomtom homerMotifs.all.meme /rds/general/user/jlt121/projects/epinott/live/user_analysed_data/Janis/databases/TF_motifs_human/H13CORE_meme_format.meme -o homerMotifs.all
+```
+
+Reading in all the hits where q.value of match is below 0.05
+
+Read in tomtom results 
+```{r}
+#read in
+tomtom <- read.table("/cuttag_dir/TF_motif_analysis/ATAC_overlap_DEG_FOXA2_vs_NEUN/homerMotifs.all/tomtom.tsv", header = TRUE)
+
+#filter based on q-value
+filtered_tomtom <- tomtom[tomtom$q.value < 0.05, ]
+
+# Merge filtered_tomtom with filtered_homer based on Query_ID and name
+filtered_homer_tomtom <- merge(filtered_tomtom, filtered_homer, by.x = "Query_ID", by.y = "homer_name", all.x = TRUE)
+
+filtered_homer_tomtom
+```
+
+#checking of TFs are expressed in cell type of interest using RNA-seq data
+
+1. Get the entrez ids 
+```{r}
+#Map it to entrez - via tomtom documentation 
+jsonl_file_path <- "/databases/TF_motifs_mouse/H13CORE-MOUSE_annotation.jsonl"
+
+# Read the JSON Lines file into a data frame
+jsonl_data <- stream_in(file(jsonl_file_path, "r"))
+
+jsonl_data_flat <- flatten(jsonl_data)
+
+entrez <- jsonl_data_flat %>%
+  dplyr::select(name = name, entrez_id = "masterlist_info.species.MOUSE.entrez", mouse_gene_symbol = "masterlist_info.species.MOUSE.gene_symbol")
+
+filtered_homer_tomtom_entrez <- merge(filtered_homer_tomtom, entrez, by.x = "Target_ID", by.y = "name", all.x = TRUE)
+
+# Ensure all entries in entrez_id are converted to strings
+filtered_homer_tomtom_entrez$entrez_id <- sapply(filtered_homer_tomtom_entrez$entrez_id, function(x) {
+  if (is.null(x) || length(x) == 0) {
+    return(NA)  # Replace empty entries with NA
+  } else {
+    return(paste(x, collapse = ","))  # Collapse multiple values into a single string
+  }
+})
+
+write.table(filtered_homer_tomtom_entrez, file = "homerMotifs_tomtom_entrez_TF_FOXA2.tsv", sep = "\t", row.names = FALSE, quote = FALSE)
+```
+
+4. Filer by RNA expression: 
+
+---
+title: "Summary table for expressed TFs "
+output: html_notebook
+---
+
+
+```{r}
+# Load TPM data
+tpm_data <- read.delim("/Nextflow/rna_seq/analysed_data/ID/star_rsem/rsem.merged.gene_tpm.tsv")
+
+rownames(tpm_data) <- tpm_data$gene_id
+
+tpm_data_cleaned <- tpm_data[-c(1:2)]
+
+# Identify FOXA2-specific samples
+foxa2_cols <- grep("FOXA2", colnames(tpm_data_cleaned), value = TRUE)
+
+# Calculate mean TPM only for FOXA2 samples
+mean_tpm_foxa2 <- rowMeans(tpm_data_cleaned[, foxa2_cols])
+
+# Set an expression threshold
+tpm_threshold <- 5 #5 should capture reliably >median expression to exclude technical noise
+
+# Create expression status table
+expression_status_foxa2 <- data.frame(
+  gene_id = rownames(tpm_data_cleaned),
+  mean_tpm_foxa2 = mean_tpm_foxa2,
+  expressed = ifelse(mean_tpm_foxa2 > tpm_threshold, "yes", "no")
+)
+
+library(biomaRt)
+mouse <- useMart("ensembl", dataset = "mmusculus_gene_ensembl")
+
+symbol_to_entrez <- getBM(
+  attributes = c("external_gene_name", "entrezgene_id"),
+  filters = "external_gene_name",
+  values = expression_status_foxa2$gene_id,
+  mart = mouse
+)
+
+expression_status_foxa2_mapped <- left_join(
+  expression_status_foxa2,
+  symbol_to_entrez,
+  by = c("gene_id" = "external_gene_name")
+)
+
+```
+
+Read in TFs from homer/tomtom
+
+```{r}
+TF_summary <- read.delim("homerMotifs_tomtom_entrez_TF_FOXA2.tsv")
+
+# Subset TPM data for genes of interest
+genes_of_interest <- c(TF_summary$mouse_gene_symbol)
+
+expression_status_foxa2_goi <- expression_status_foxa2_mapped %>%
+  filter(gene_id %in% genes_of_interest)
+
+TF_summary_expression_data <- merge(TF_summary, expression_status_foxa2_goi, by.x = "mouse_gene_symbol", by.y = "gene_id", all.x = TRUE)
+
+# Remove rows with NA in expression_status column
+TF_summary_expression_data_filtered <- TF_summary_expression_data %>%
+  filter(!is.na(expressed))
+
+```
+
+Remove all TFs which are not expressed
+```{r}
+
+filtered_data <- TF_summary_expression_data_filtered[TF_summary_expression_data_filtered$expressed == "yes", ]
+
+#order by qvalue
+ordered_data <- filtered_data %>%
+  arrange(q.value)
+
+# View the ordered data
+head(ordered_data)
+```
+
+creating summary table and identifying best match
+
+```{r}
+# Load necessary library
+library(dplyr)
+
+# Assuming your data is stored in a CSV file, read it into R
+data <- ordered_data
+
+# Step 1: Find the minimum p.value for each Target_ID
+best_matches <- data %>%
+  group_by(mouse_gene_symbol) %>%
+  filter(q.value == min(q.value)) %>%
+  ungroup()
+
+# Remove duplicates based on SYMBOL, retaining only the row with the best (minimum) q.value
+best_matches_unique <- best_matches %>%
+  group_by(mouse_gene_symbol) %>%
+  filter(row_number() == 1) %>%
+  ungroup()
+
+# Step 2: Assign each Target_ID to its best Query_ID and summarize
+summary_table <- best_matches_unique %>%
+  group_by(Query_ID) %>%
+  summarise(
+    Matched_Target_IDs = paste(mouse_gene_symbol, collapse = ", "),
+    tomtom_qvalue = paste(q.value, collapse = ", "),
+    tomtom_evalue = paste(E.value, collapse = ", ")
+  )
+
+
+# The Homer_FDR for a Query_ID is the smallest q.value from the filtered data
+query_homer_fdr <- data %>%
+  group_by(Query_ID) %>%
+  summarise(
+    Homer_FDR = min(homer_fdr),
+    .groups = 'drop'
+  )
+
+# Step 5: Merge the Homer_FDR values into the summary table
+final_summary_table <- summary_table %>%
+  left_join(query_homer_fdr, by = "Query_ID")
+
+final_summary_table <- final_summary_table %>%
+  mutate(Homer_FDR = as.numeric(Homer_FDR)) %>%  # Convert Homer_FDR to numeric
+  arrange(Homer_FDR)  # Sort the table in ascending order
+
+final_summary_table <- final_summary_table %>%
+  mutate(Homer_FDR = format(Homer_FDR, scientific = TRUE, digits = 3))
+
+library(knitr)
+library(rmarkdown)
+
+table<-kable(final_summary_table, format="markdown")
+cat(table, sep="\n", file="summarytable_motifs.Rmd")
+render("summarytable_motifs.Rmd", output_format = "html_document")
+
+write.csv(filtered_data, "expression_filtered_TF_summary.csv")
+
+```
+
+Step 5: Add decoupleR snRNA-seq TF activity
+
+```{r}
+setwd("cuttag_dir/TF_motif_analysis/ATAC_overlap_DEG_FOXA2_vs_NEUN/summary/")
+decoupleR_results <- read.csv("/home/snRNA_seq/cellranger_output/merged_data/decoupleR/cluster_TF_activity_summary_DANs.csv")
+
+library(orthogene)
+# Use orthogene to map from human to mouse
+library(dplyr)
+
+rownames(decoupleR_results) <- decoupleR_results$TF
+
+mapped <- orthogene::convert_orthologs(decoupleR_results,
+  gene_input = "rownames",
+  gene_output = "rownames",
+  input_species = "human",
+  output_species = "mouse",
+  method = "homologene",  # or "homologene" or "babelgene" as fallback
+  non121_strategy = "drop_both_species"  # drops TFs without mapped orthologs
+)
+
+mapped$TF_mouse <- rownames(mapped)
+
+
+TF_summary <- read.csv("expression_filtered_TF_summary.csv")
+```
+
+```{r}
+library(dplyr)
+merged_df <- TF_summary %>%
+  left_join(mapped, by = c("mouse_gene_symbol" = "TF_mouse"))
+
+```
+
+```{r}
+#order by qvalue
+ordered_data <- merged_df %>%
+  arrange(q.value)
+
+data <- ordered_data
+
+# Step 1: Find the minimum p.value for each Target_ID
+best_matches <- data %>%
+  group_by(mouse_gene_symbol) %>%
+  filter(q.value == min(q.value)) %>%
+  ungroup()
+
+# Remove duplicates based on SYMBOL, retaining only the row with the best (minimum) q.value
+best_matches_unique <- best_matches %>%
+  group_by(mouse_gene_symbol) %>%
+  filter(row_number() == 1) %>%
+  ungroup()
+
+best_matches_unique <- best_matches_unique %>%
+  mutate(gene_symbol_colored = case_when(
+    delta > 0 & p_adj < 0.05 ~ paste0("<span style='color:#800020;'><b>", mouse_gene_symbol, "</b></span>"), 
+    TRUE ~ mouse_gene_symbol
+  ))
+
+
+# Step 2: Assign each Target_ID to its best Query_ID and summarize
+summary_table <- best_matches_unique %>%
+  group_by(Query_ID) %>%
+  summarise(
+    Matched_Target_IDs = paste(gene_symbol_colored, collapse = ", "),
+    tomtom_qvalue = paste(q.value, collapse = ", "),
+    tomtom_evalue = paste(E.value, collapse = ", ")
+  )
+
+
+# The Homer_FDR for a Query_ID is the smallest q.value from the filtered data
+query_homer_fdr <- data %>%
+  group_by(Query_ID) %>%
+  summarise(
+    Homer_FDR = min(homer_fdr),
+    .groups = 'drop'
+  )
+
+# Step 5: Merge the Homer_FDR values into the summary table
+final_summary_table <- summary_table %>%
+  left_join(query_homer_fdr, by = "Query_ID")
+
+final_summary_table <- final_summary_table %>%
+  mutate(Homer_FDR = as.numeric(Homer_FDR)) %>%  # Convert Homer_FDR to numeric
+  arrange(Homer_FDR)  # Sort the table in ascending order
+
+final_summary_table <- final_summary_table %>%
+  mutate(Homer_FDR = format(Homer_FDR, scientific = TRUE, digits = 3))
+```
+
+
+
+```{r}
+library(knitr)
+library(rmarkdown)
+table<-kable(final_summary_table, format="markdown")
+cat(table, sep="\n", file=("decouple_colored_summary_table.Rmd"))
+render("decouple_colored_summary_table.Rmd", output_format = "html_document")
+```
+
+Step 6: TPM heatmap:
+
+
+```{r}
+# Load TPM data
+tpm_data <- read.delim("/Nextflow/rna_seq/analysed_data/ID/star_rsem/rsem.merged.gene_tpm.tsv")
+
+rownames(tpm_data) <- tpm_data$gene_id
+
+tpm_data_cleaned <- tpm_data[-c(1:2)]
+
+# Group assignments
+group_assignments <- c(
+  "JLT0395_mus_CR019_NeuN_RNA_totalRNA_WT_20221213" = "NEUN", 
+  "JLT0465_mus_CR024_NeuN_RNA_totalRNA_WT_20230306" = "NEUN",
+  "JLT0468_mus_CR025_NeuN_RNA_totalRNA_WT_20230306" = "NEUN",
+  "JLT0396_mus_CR019_OLIG_RNA_totalRNA_WT_20221213" = "OLIG2",
+  "JLT0466_mus_CR024_OLIG2_RNA_totalRNA_WT_20230306" = "OLIG2",
+  "JLT0397_mus_CR019_FOXA2_RNA_totalRNA_WT_20221213" = "FOXA2",
+  "JLT0467_mus_CR025_FOXA2_RNA_totalRNA_WT_20230306" = "FOXA2"
+)
+
+# Load tidyverse
+library(dplyr)
+library(tibble)
+library(tidyr)
+
+tpm_long <- tpm_data_cleaned %>%
+  rownames_to_column("gene") %>%
+  pivot_longer(-gene, names_to = "sample", values_to = "tpm")
+
+tpm_long$group <- group_assignments[tpm_long$sample]
+
+#remove any entries where group is NA (if any samples left not in mapping)
+tpm_long <- tpm_long %>% filter(!is.na(group))
+
+#get mean TPM per cell type
+mean_tpm_per_group <- tpm_long %>%
+  group_by(gene, group) %>%
+  summarise(mean_tpm = mean(tpm), .groups = "drop") %>%
+  pivot_wider(names_from = group, values_from = mean_tpm)
+
+# Set an expression threshold
+tpm_threshold <- 5 #5 should capture reliably >median expression to exclude technical noise
+```
+
+Filter to genes of interest in TF summary
+```{r}
+
+TF_summary <- read.delim("summary/homerMotifs_tomtom_entrez_TF_FOXA2.tsv")
+
+genes_of_interest <- c(TF_summary$mouse_gene_symbol)
+
+TPM_goi <- mean_tpm_per_group %>%
+  filter(gene%in% genes_of_interest)
+
+```
+
+plot to heatmap
+```{r}
+# Load heatmap library
+library(pheatmap)
+
+# Convert to matrix and set rownames
+tpm_matrix <- TPM_goi %>%
+  column_to_rownames("gene") %>%
+  as.matrix()
+
+# Log transform for visualization 
+tpm_matrix_log <- log2(tpm_matrix + 1)
+
+color_palette <- colorRampPalette(colors = c("#FFFFFF", "#EAFDB4", "#C5E862", "#6DC335", "#117733"))(100)
+
+```
+
+
+Adding which motif they are matched to
+```{r}
+
+TF_summary <- read.csv("summary/expression_filtered_TF_summary.csv")
+
+expression_status_foxa2_goi <- TPM_goi %>%
+  rownames_to_column("gene_id") %>%
+  mutate(expressed = ifelse(FOXA2 > 5, "yes", "no"))
+
+TF_summary_expression_data <- merge(
+  TF_summary, 
+  expression_status_foxa2_goi, 
+  by.x = "mouse_gene_symbol", 
+  by.y = "gene", 
+  all.x = TRUE
+)
+
+# Remove rows with NA in expression_status column
+TF_summary_expression_data_filtered <- TF_summary_expression_data %>%
+  filter(!is.na(expressed.y))
+
+# Filter the dataframe to keep only rows where h3k4me3_peak_at_TSS is "yes"
+filtered_data <- TF_summary_expression_data_filtered[TF_summary_expression_data_filtered$expressed.y == "yes", ]
+
+#order by qvalue
+ordered_data <- filtered_data %>%
+  arrange(q.value)
+
+# View the ordered data
+head(ordered_data)
+
+# Load necessary library
+library(dplyr)
+
+# Assuming your data is stored in a CSV file, read it into R
+data <- ordered_data
+
+# Step 1: Find the minimum p.value for each Target_ID
+best_matches <- data %>%
+  group_by(mouse_gene_symbol) %>%
+  filter(q.value == min(q.value)) %>%
+  ungroup()
+
+# Remove duplicates based on SYMBOL, retaining only the row with the best (minimum) q.value
+best_matches_unique <- best_matches %>%
+  group_by(mouse_gene_symbol) %>%
+  filter(row_number() == 1) %>%
+  ungroup()
+
+# Step 2: Assign each Target_ID to its best Query_ID and summarize
+summary_table <- best_matches_unique %>%
+  group_by(Query_ID) %>%
+  summarise(
+    Matched_Target_IDs = paste(mouse_gene_symbol, collapse = ", "),
+    tomtom_qvalue = paste(q.value, collapse = ", "),
+    tomtom_evalue = paste(E.value, collapse = ", ")
+  )
+
+summary_table 
+```
+
+```{r}
+library(tidyr)
+library(dplyr)
+goi <- best_matches_unique$mouse_gene_symbol
+tpm_matrix_log_filtered <- tpm_matrix_log[rownames(tpm_matrix_log) %in% goi,]
+
+motif_tf_map <- summary_table %>%
+  dplyr::select(Query_ID, Matched_Target_IDs) %>%
+  tidyr::separate_rows(Matched_Target_IDs, sep = ",\\s*") %>%
+  dplyr::rename(gene = Matched_Target_IDs)
+
+# Keep only the genes in the matrix
+motif_annotation <- motif_tf_map %>%
+  filter(gene %in% rownames(tpm_matrix_log_filtered)) %>%
+  distinct(gene, Query_ID)
+
+# Ensure the order matches the heatmap row order
+motif_annotation <- motif_annotation %>%
+  right_join(data.frame(gene = rownames(tpm_matrix_log_filtered)), by = "gene") %>%
+  column_to_rownames("gene")
+
+# Assign unique colors to each motif
+motif_levels <- unique(motif_annotation$Query_ID)
+
+motif_colors <- c(
+  "#4C8577",  # earthy teal
+  "#76B39D",  # muted mint
+  "#A7A1B9",  # lavender grey
+  "#D8CBB5",  # sand beige
+  "#A24C66",  # dusky rose
+  "#581845",  # plum eggplant
+  "#E4A89C",  # warm blush
+  "#9FB6A2",  # sage grey
+  "#305F72",  # deep moss green
+  "#C7B198"  # muted mocha
+)
+
+# Check length matches color vector
+stopifnot(length(motif_levels) <= length(motif_colors))
+
+# Assign names to the custom color vector
+motif_colors <- setNames(motif_colors[1:length(motif_levels)], motif_levels)
+
+# Build the row annotation data frame
+annotation_row <- data.frame(Motif = motif_annotation$Query_ID)
+rownames(annotation_row) <- rownames(motif_annotation)
+
+# Get genes ordered by motif group (alphabetical by Query_ID)
+ordered_genes <- annotation_row %>%
+  arrange(Motif) %>%
+  rownames()
+
+# Reorder both matrix and annotation_row
+tpm_matrix_log_filtered <- tpm_matrix_log_filtered[ordered_genes, ]
+
+
+annotation_row_ordered <- annotation_row[ordered_genes, ]
+
+annotation_colors <- list(
+  CellType = c("FOXA2" = "#B8A5C5", "NEUN" = "#7CCAB5", "OLIG2" = "#7CB4D4"),
+  Motif = motif_colors
+)
+
+pdf("summary/TF_TPMs_heatmap_only_expressed_TFs_with_motif_annotation.pdf", height= 10)
+
+pheatmap(
+  tpm_matrix_log_filtered,
+  cluster_rows = FALSE,
+  cluster_cols = FALSE,
+  annotation_col = annotation_col,
+  annotation_row = annotation_row,
+  annotation_colors = annotation_colors,
+  main = "TFs expressed in FOXA2 (TPM > 5), annotated by motif",
+  show_colnames = FALSE,
+  show_rownames = TRUE,
+  fontsize_row = 8,
+  cellwidth = 10,
+  cellheight = 10,
+  legend = TRUE,
+  color = color_palette,
+  breaks = seq(log2(5 + 1), max(tpm_matrix_log, na.rm = TRUE), length.out = 100),
+  treeheight_row = 0,
+  treeheight_col = 0,
+  legend_position = "right"
+)
+dev.off()
+
+
+```
+
+
+Step 7: DEG heatmap:
+
+```{r}
+library(purrr)
+library(dplyr)
+library(pheatmap)
+
+setwd("/cuttag_dir/TF_motif_analysis/ATAC_overlap_DEG_FOXA2_vs_NEUN/summary/")
+
+deg_f_df <- read.csv("/rna_dir/deg_FOXA2_vs_others_annotated.csv")
+
+deg_n_df <- read.csv("/rna_dir/deg_NEUN_vs_others_annotated.csv")
+
+deg_o_df <- read.csv("/rna_dir/deg_OLIG2_vs_others_annotated.csv")
+
+TF_summary <- read.csv("expression_filtered_TF_summary.csv")
+
+genes_of_interest <- c(unique(TF_summary$mouse_gene_symbol))
+
+deg_genes_of_interest_f <- deg_f_df[deg_f_df$X %in% genes_of_interest, ]
+
+deg_genes_of_interest_n <- deg_n_df[deg_n_df$X %in% genes_of_interest, ]
+
+deg_genes_of_interest_o <- deg_o_df[deg_o_df$X %in% genes_of_interest, ]
+
+
+# Align rows by gene symbol
+deg_f <- deg_genes_of_interest_f %>% dplyr::select(X, logFC) %>% rename(FOXA2_vs_others = logFC)
+deg_n <- deg_genes_of_interest_n %>% dplyr::select(X, logFC) %>% rename(NEUN_vs_others = logFC)
+deg_o <- deg_genes_of_interest_o %>% dplyr::select(X, logFC) %>% rename(OLIG2_vs_others = logFC)
+
+# Full join to keep all TFs (if some are missing in one comparison)
+logFC_matrix <- reduce(list(deg_f, deg_n, deg_o), full_join, by = "X")
+
+# Optional: turn X into rownames
+logFC_matrix <- logFC_matrix %>% column_to_rownames("X")
+
+# Optional: You can remove any rows with missing values (NA) if you want a cleaner plot
+logFC_matrix <- na.omit(logFC_matrix)
+
+num_steps <- 100
+color_palette <- colorRampPalette(colors = c("#00876C", "#7CCAB5", "#E0F2ED", "#B8A5C5", "#9B5AB9", "#4E1F64"))(num_steps)
+
+```
+
+Adding which motif they are matched to
+```{r}
+
+TF_summary <- read.csv("expression_filtered_TF_summary.csv")
+
+filtered_data <- TF_summary
+
+#order by qvalue
+ordered_data <- filtered_data %>%
+  arrange(q.value)
+
+# View the ordered data
+head(ordered_data)
+
+# Load necessary library
+library(dplyr)
+
+# Assuming your data is stored in a CSV file, read it into R
+data <- ordered_data
+
+# Step 1: Find the minimum p.value for each Target_ID
+best_matches <- data %>%
+  group_by(mouse_gene_symbol) %>%
+  filter(q.value == min(q.value)) %>%
+  ungroup()
+
+# Remove duplicates based on SYMBOL, retaining only the row with the best (minimum) q.value
+best_matches_unique <- best_matches %>%
+  group_by(mouse_gene_symbol) %>%
+  filter(row_number() == 1) %>%
+  ungroup()
+
+# Step 2: Assign each Target_ID to its best Query_ID and summarize
+summary_table <- best_matches_unique %>%
+  group_by(Query_ID) %>%
+  summarise(
+    Matched_Target_IDs = paste(mouse_gene_symbol, collapse = ", "),
+    tomtom_qvalue = paste(q.value, collapse = ", "),
+    tomtom_evalue = paste(E.value, collapse = ", ")
+  )
+
+summary_table 
+```
+
+```{r}
+library(tidyr)
+library(dplyr)
+
+motif_tf_map <- summary_table %>%
+  dplyr::select(Query_ID, Matched_Target_IDs) %>%
+  tidyr::separate_rows(Matched_Target_IDs, sep = ",\\s*") %>%
+  dplyr::rename(gene = Matched_Target_IDs)
+
+# Keep only the genes in the matrix
+motif_annotation <- motif_tf_map %>%
+  filter(gene %in% rownames(logFC_matrix)) %>%
+  distinct(gene, Query_ID)
+
+# Ensure the order matches the heatmap row order
+motif_annotation <- motif_annotation %>%
+  right_join(data.frame(gene = rownames(logFC_matrix)), by = "gene") %>%
+  column_to_rownames("gene")
+
+# Assign unique colors to each motif
+motif_levels <- unique(motif_annotation$Query_ID)
+
+motif_colors <- c(
+  "#4C8577",  # earthy teal
+  "#76B39D",  # muted mint
+  "#A7A1B9",  # lavender grey
+  "#D8CBB5",  # sand beige
+  "#A24C66",  # dusky rose
+  "#581845",  # plum eggplant
+  "#E4A89C",  # warm blush
+  "#9FB6A2",  # sage grey
+  "#305F72",  # deep moss green
+  "#C7B198"  # muted mocha
+)
+
+# Check length matches color vector
+stopifnot(length(motif_levels) <= length(motif_colors))
+
+# Assign names to the custom color vector
+motif_colors <- setNames(motif_colors[1:length(motif_levels)], motif_levels)
+
+# Build the row annotation data frame
+annotation_row <- data.frame(Motif = motif_annotation$Query_ID)
+rownames(annotation_row) <- rownames(motif_annotation)
+
+# Get genes ordered by motif group (alphabetical by Query_ID)
+ordered_genes <- annotation_row %>%
+  arrange(Motif) %>%
+  rownames()
+
+# Reorder both matrix and annotation_row
+logFC_matrix_ordered <- logFC_matrix[ordered_genes, ]
+
+annotation_row_ordered <- annotation_row[ordered_genes, ]
+
+annotation_colors <- list(
+  CellType = c("FOXA2_vs_others" = "#B8A5C5", "NEUN_vs_others" = "#7CCAB5", "OLIG2_vs_others"="#7CB4D4"),
+  Motif = motif_colors
+)
+
+
+```
+Adding significance stars 
+```{r}
+
+# Align rows by gene symbol
+deg_f_fdr <- deg_genes_of_interest_f %>% dplyr::select(X, FDR) %>% rename(FOXA2_vs_others = FDR)
+deg_n_fdr <- deg_genes_of_interest_n %>% dplyr::select(X, FDR) %>% rename(NEUN_vs_others = FDR)
+deg_o_fdr <- deg_genes_of_interest_o %>% dplyr::select(X, FDR) %>% rename(OLIG2_vs_others = FDR)
+
+# Full join to keep all TFs (if some are missing in one comparison)
+FDR_matrix <- reduce(list(deg_f_fdr, deg_n_fdr, deg_o_fdr), full_join, by = "X")
+
+# Optional: turn X into rownames
+FDR_matrix <- FDR_matrix %>% column_to_rownames("X")
+
+# Convert to stars using dplyr
+fdr_stars <- as.data.frame(lapply(FDR_matrix, function(x) {
+  cut(x,
+      breaks = c(-Inf, 0.001, 0.01, 0.05, Inf),
+      labels = c("***", "**", "*", ""),
+      right = FALSE)
+}))
+
+rownames(fdr_stars) <- rownames(FDR_matrix)
+
+fdr_stars_ordered <- fdr_stars[ordered_genes, ]
+
+annotation_col<-data.frame(CellType=colnames(logFC_matrix_ordered))
+rownames(annotation_col)<-annotation_col$CellType
+
+```
+
+```{r}
+
+pdf("TF_DEG_heatmap.pdf", height = 10)
+pheatmap(
+  logFC_matrix_ordered,
+  cluster_rows = FALSE,
+  cluster_cols = FALSE,
+  main = "DEG of transcription factors (logFC)",
+  show_colnames = FALSE,
+  show_rownames = TRUE,
+  annotation_colors = annotation_colors,
+  annotation_row = annotation_row,
+  annotation_col = annotation_col,
+  fontsize_row = 8,
+  cellwidth = 10,
+  cellheight = 10,
+  legend = TRUE,       # Add a legend for the color scale
+  legend_scale = 0.5,    # Adjust the size of the 
+  color = color_palette,        # Use the predefined color palette
+  breaks = seq(-6, 6, length.out = num_steps),
+  treeheight_row = 0,
+  treeheight_col = 0,
+  display_numbers = fdr_stars_ordered,    # ✨ add the stars as labels
+  number_color = "black",         # color of stars (adjust if needed)
+  fontsize_number = 6,
+  legend_position = "right"  # Adjust the position of the legend
+)
+dev.off()
+```
+
+
+
+

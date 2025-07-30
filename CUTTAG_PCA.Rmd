@@ -1,0 +1,248 @@
+---
+title: "PCA_for_QC"
+output: html_notebook
+---
+
+#Janis
+
+```{r}
+# Load required libraries
+library(edgeR)
+library(dplyr)
+library(DESeq2)
+library(GenomicRanges)
+library(org.Hs.eg.db)
+library(ChIPseeker)
+library(TxDb.Hsapiens.UCSC.hg38.knownGene)
+library(pheatmap)
+library(ggplot2)
+library(viridis)
+library(fgsea)
+```
+
+
+######ANNOTATE TO GENES######
+```{r}
+library(edgeR)
+
+# Define base directory
+base_dir <- "dir"
+setwd(base_dir)
+
+# Create DEG directory if it doesn't exist
+deg_dir <- file.path(base_dir, "DEG_dir/")
+if (!dir.exists(deg_dir)) {
+  dir.create(deg_dir)
+}
+
+# File paths
+counts_file <- file.path(base_dir, "featurecounts/All_samples_counts.txt")
+
+# Read FeatureCounts file
+counts <- read.table(counts_file, header = TRUE)
+
+
+rownames(counts) <- counts$Geneid
+
+
+# Clean column names
+colnames(counts) <- gsub(".*{sample_prefix}.|.dedup.q30.no_blacklist.bam", "", colnames(counts))
+
+# Extract counts data
+counts_data <- counts[-c(1:6)]
+
+# Identify chromosome column (adjust if needed)
+chr_column <- counts$Chr  # Ensure "Chr" is the correct column
+
+# Exclude X and Y chromosomes
+valid_rows <- !chr_column %in% c("chrX", "chrY")
+filtered_counts_data <- counts_data[valid_rows, ]  # Keep only autosomes
+filtered_counts <- counts[valid_rows, ]  # Keep annotation metadata
+
+#confirm removal
+chr_column <- filtered_counts$Chr  
+print(table(chr_column))  # Should no longer show X and Y
+
+
+# Create GRanges object
+granges_object <- GRanges(
+  seqnames = Rle(counts$Chr),
+  ranges = IRanges(start = counts$Start, end = counts$End),
+  metadata = counts
+)
+
+# Annotate peaks
+txdb <- TxDb.Hsapiens.UCSC.hg38.knownGene
+annotated_peaks <- annotatePeak(granges_object, tssRegion = c(-2000, 500), 
+                                TxDb = txdb, assignGenomicAnnotation = TRUE, 
+                                annoDb = "org.Hs.eg.db", verbose = TRUE)
+
+# Convert annotations to dataframe
+all_peaks_annotated <- as.data.frame(annotated_peaks@anno@elementMetadata)
+
+rownames(all_peaks_annotated) <- all_peaks_annotated$metadata.Geneid
+
+# Function to match and annotate DE results
+get_genes_and_annotations <- function(deg, annotations) {
+  matched_idx <- match(rownames(deg), rownames(annotations))
+  cols <- c("SYMBOL", "ENSEMBL", "metadata.Geneid", "annotation", "distanceToTSS",
+            "metadata.Chr", "metadata.Start", "metadata.End")
+  deg[cols] <- annotations[matched_idx, cols]
+  return(deg)
+}
+
+```
+
+
+
+######ADD METADATA######
+```{r}
+
+sample_metadata <- read.delim("dir/sample_metadata.tsv", sep="\t")
+
+```
+
+
+```{r}
+
+counts_data <- filtered_counts_data
+
+
+# Also update sample metadata accordingly
+sample_metadata <- sample_metadata[match(colnames(counts_data), sample_metadata$Sample), ]
+
+
+# Create DGEList object
+d <- DGEList(counts = counts_data)
+
+# Filtering lowly expressed genes
+keep <- rowSums(cpm(d) > 1) >= 2
+d <- d[keep,]
+
+# Estimate library sizes and normalization factors
+d <- calcNormFactors(d, method = "TMM")
+
+
+# Ensure metadata matches counts_data column order
+sample_metadata <- sample_metadata[match(colnames(counts_data), sample_metadata$Sample), ]
+
+sample_metadata$Donor <- factor(sample_metadata$Donor)
+sample_metadata$Cell_Type <- factor(sample_metadata$Cell_Type)
+
+
+design <- model.matrix(~ 0 + Cell_Type + Donor, data = sample_metadata)
+
+d <- estimateDisp(d, design, robust = TRUE)
+
+# Scale counts to CPM (counts per million) using TMM-normalized library sizes
+scaled_counts <- cpm(d, normalized.lib.sizes = TRUE)
+
+  # Fit generalized linear model with Quasi-Likelihood F-test
+fit <- glmQLFit(d, design, robust = TRUE)
+
+logCPM <- cpm(d, log = TRUE, prior.count = 1)
+
+
+#run PCA to see batch effect contribution
+
+metadata <- sample_metadata
+metadata <- metadata[match(colnames(logCPM), metadata$Sample), ]
+
+# Perform PCA
+pca <- prcomp(t(logCPM), scale. = TRUE)
+
+
+
+# Convert PCA results into a dataframe
+pca_df <- data.frame(Sample = colnames(logCPM), 
+                     PC1 = pca$x[, 1], 
+                     PC2 = pca$x[, 2], 
+                     CellType = metadata$Cell_Type,
+                     Batch = metadata$Donor)
+
+CT_colors <- c("NEUN" = "#009E73", "FOXA2" = "#785594", "OLIG2" = "#0072B2")
+
+# Plot PCA
+pca_plot <- ggplot(pca_df, aes(x = PC1, y = PC2, color = CellType , shape = Batch)) +
+  geom_point(size = 4, alpha = 0.8) +
+  theme_minimal() +
+  labs(title = "PCA of CUT&Tag Samples",
+       x = paste0("PC1 (", round(100 * summary(pca)$importance[2,1], 1), "% variance)"),
+       y = paste0("PC2 (", round(100 * summary(pca)$importance[2,2], 1), "% variance)")) +
+  theme(legend.position = "right") +
+  scale_color_manual(values = CT_colors)
+
+
+
+
+pdf("PCA_donor_cell_type_all_samples.pdf", width =5, height =4)
+print(pca_plot)
+dev.off()
+
+```
+
+```{r}
+library(ggplot2)
+library(ggExtra)
+
+# Define Scatter Density Function
+Scatter_Density <- function(data, batch, trt, expl.var, xlim, ylim, 
+                            batch.legend.title, trt.legend.title, title) {
+  
+  # Create the scatter plot
+  p <- ggplot(data, aes(x = PC1, y = PC2, color = trt, shape = batch)) +
+    geom_point(size = 4, alpha = 0.8) +
+    theme_minimal() +
+    labs(x = paste0("PC1 (", round(expl.var[1] * 100, 1), "% variance)"),
+         y = paste0("PC2 (", round(expl.var[2] * 100, 1), "% variance)"),
+         color = trt.legend.title,
+         shape = batch.legend.title,
+         title = title) +
+    scale_shape_manual(values = c(16, 17, 18, 4, 5, 7)) +
+    theme(legend.position = "right") + 
+    scale_color_manual(values = CT_colors)
+  
+  # Add marginal density plots
+  ggMarginal(p, type = "density", margins = "both", groupColour = TRUE, groupFill = TRUE)
+}
+
+
+pdf("scatter_plot_donor_cell_type_all_samples.pdf", width =5, height =4)
+
+# Example Usage:
+Scatter_Density(
+  data = pca_df, 
+  batch = pca_df$Batch, 
+  trt = pca_df$CellType, 
+  expl.var = c(0.275, 0.139),  # Replace with actual explained variance
+  xlim = c(-200, 250), ylim = c(-150, 200), 
+  batch.legend.title = 'Batch (batch)', 
+  trt.legend.title = 'CellType (trt)', 
+  title = 'Before batch effect correction'
+)
+
+dev.off()
+```
+
+```{r}
+
+library(variancePartition)
+
+geneExpr <- logCPM
+
+geneCounts <- filtered_counts_data
+
+data(varPartData)
+
+#age + pmi continous, others categorical
+form <- ~ (1 | Cell_Type) + (1 | Donor) + (1 | Sex)
+varPart <- fitExtractVarPartModel(logCPM, form, metadata)
+vp <- sortCols(varPart)
+
+
+pdf("variancePartition_plot_Donor_CellType_sex_all_samples.pdf", width = 5, height =3)
+plotVarPart(vp)
+dev.off()
+```
+
+

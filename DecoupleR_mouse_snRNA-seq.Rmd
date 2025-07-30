@@ -1,0 +1,210 @@
+
+```{r}
+
+library(Seurat)
+library(decoupleR)
+library(pheatmap)
+
+setwd("/home/snRNA_seq/cellranger_output/merged_data/decoupleR")
+sc <- readRDS("/home/snRNA_seq/cellranger_output/merged_data/integrated_data.rds")
+
+
+library(dplyr)
+
+set.seed(42)
+data <- subset(sc, cells = sample(colnames(sc), 10000)) #subset to 10,000 cells
+
+
+#confirm we have different cell types
+p <- Seurat::DimPlot(data, 
+                     reduction = "umap", 
+                     label = TRUE, 
+                     pt.size = 0.5) + 
+  Seurat::NoLegend()
+p
+
+net <- decoupleR::get_collectri(organism = 'mouse', 
+                                split_complexes = FALSE)
+
+net
+
+library(orthogene)
+
+#mat <- as.matrix(LayerData(data[["RNA"]], layer = "data"))
+mat <- Matrix::t(Matrix::t(LayerData(data[["RNA"]], layer = "data")))  # Keeps sparse
+
+
+mat_human <- convert_orthologs(
+  gene_df = mat,
+  gene_input = "rownames",
+  gene_output = "rownames",
+  input_species = "mouse",
+  output_species = "human",
+  non121_strategy = "drop_both_species",  # safest for regulatory networks
+  method = "homologene"
+)
+
+
+# Run ulm
+acts <- decoupleR::run_ulm(mat = mat_human, 
+                           net = net, 
+                           .source = 'source', 
+                           .target = 'target',
+                           .mor='mor', 
+                           minsize = 5)
+
+acts
+
+saveRDS(acts, file =  "TF_acts_singlecell.rds")
+
+# Extract ulm and store it in tfsulm in pbmc
+data[['tfsulm']] <- acts %>%
+  tidyr::pivot_wider(id_cols = 'source', 
+                     names_from = 'condition',
+                     values_from = 'score') %>%
+  tibble::column_to_rownames('source') %>%
+  Seurat::CreateAssayObject(.)
+
+# Change assay
+DefaultAssay(object = data) <- "tfsulm"
+
+# Scale the data
+data <- Seurat::ScaleData(data)
+data@assays$tfsulm@data <- data@assays$tfsulm@scale.data
+
+n_tfs <- 40
+
+# Extract activities from object as a long dataframe
+df <- t(as.matrix(data@assays$tfsulm@data)) %>%
+  as.data.frame() %>%
+  dplyr::mutate(cluster = Seurat::Idents(data)) %>%
+  tidyr::pivot_longer(cols = -cluster, 
+                      names_to = "source", 
+                      values_to = "score") %>%
+  dplyr::group_by(cluster, source) %>%
+  dplyr::summarise(mean = mean(score))
+
+# Get top tfs with more variable means across clusters
+tfs <- df %>%
+  dplyr::group_by(source) %>%
+  dplyr::summarise(std = stats::sd(mean)) %>%
+  dplyr::arrange(-abs(std)) %>%
+  head(n_tfs) %>%
+  dplyr::pull(source)
+
+# Subset long data frame to top tfs and transform to wide matrix
+top_acts_mat <- df %>%
+  dplyr::filter(source %in% tfs) %>%
+  tidyr::pivot_wider(id_cols = 'cluster', 
+                     names_from = 'source',
+                     values_from = 'mean') %>%
+  tibble::column_to_rownames('cluster') %>%
+  as.matrix()
+
+# Choose color palette
+colors <- rev(RColorBrewer::brewer.pal(n = 11, name = "PRGn"))
+colors.use <- grDevices::colorRampPalette(colors = colors)(100)
+
+my_breaks <- c(seq(-2, 0, length.out = ceiling(100 / 2) + 1),
+               seq(0.05, 2, length.out = floor(100 / 2)))
+
+# Plot
+pdf("TF_heatmap_activity_decoupleR_10K.pdf", width = 20, height = 10)
+pheatmap::pheatmap(mat = top_acts_mat,
+                   color = colors.use,
+                   border_color = "white",
+                   breaks = my_breaks,
+                   cellwidth = 15,
+                   cellheight = 15,
+                   treeheight_row = 20,
+                   treeheight_col = 20) 
+dev.off()
+
+```
+#IDENTIFY TFS SPECIFICALLY ACTIVE IN DA-NEURON CLUSTER
+
+#read in results
+acts <- readRDS(file =  "TF_acts_singlecell.rds")
+
+data[['tfsulm']] <- acts %>%
+  tidyr::pivot_wider(id_cols = 'source', 
+                     names_from = 'condition',
+                     values_from = 'score') %>%
+  tibble::column_to_rownames('source') %>%
+  Seurat::CreateAssayObject(.)
+
+# Change assay
+DefaultAssay(object = data) <- "tfsulm"
+
+# Scale the data
+data <- Seurat::ScaleData(data)
+data@assays$tfsulm@data <- data@assays$tfsulm@scale.data
+
+# Step 1: Extract single-cell activity matrix
+tf_matrix <- t(as.matrix(data@assays$tfsulm@data)) %>%
+  as.data.frame()
+
+# Step 2: Add cluster identities
+tf_matrix$cluster <- Seurat::Idents(data)
+
+# Identify DAN and non-DAN cells
+dan_cells <- rownames(tf_matrix)[tf_matrix$cluster == "DANs"]
+non_dan_cells <- rownames(tf_matrix)[tf_matrix$cluster != "DANs"]
+
+# Count NAs for each TF
+na_summary <- purrr::map_dfr(
+  .x = colnames(tf_matrix)[!colnames(tf_matrix) %in% "cluster"],
+  .f = function(tf) {
+    tibble(
+      TF = tf,
+      n_NA_DAN = sum(is.na(tf_matrix[dan_cells, tf])),
+      n_DAN = length(dan_cells),
+      n_NA_Other = sum(is.na(tf_matrix[non_dan_cells, tf])),
+      n_Other = length(non_dan_cells)
+    )
+  }
+)
+
+# Add % missing for readability
+na_summary <- na_summary %>%
+  mutate(
+    perc_NA_DAN = round(100 * n_NA_DAN / n_DAN, 1),
+    perc_NA_Other = round(100 * n_NA_Other / n_Other, 1)
+  )
+
+# View TFs with high NA proportions
+na_summary %>% arrange(desc(perc_NA_DAN)) %>% head(10)
+
+
+library(dplyr)
+library(tidyr)
+# Step 3: Perform differential activity testing for each TF
+# Compare DANs vs. all other clusters using Wilcoxon test
+dan_tf_stats <- purrr::map_dfr(
+  .x = colnames(tf_matrix)[!colnames(tf_matrix) %in% "cluster"],
+  .f = function(tf) {
+    dan_vals <- tf_matrix[tf_matrix$cluster == "DANs", tf]
+    other_vals <- tf_matrix[tf_matrix$cluster != "DANs", tf]
+
+    # Only test if both groups have ≥2 non-NA values
+    if (sum(!is.na(dan_vals)) >= 2 && sum(!is.na(other_vals)) >= 2) {
+      test <- wilcox.test(dan_vals, other_vals, alternative = "greater")
+      tibble(
+        TF = tf,
+        p_val = test$p.value,
+        mean_score_DAN = mean(dan_vals, na.rm = TRUE),
+        mean_score_Other = mean(other_vals, na.rm = TRUE),
+        delta = mean_score_DAN - mean_score_Other
+      )
+    } else {
+      tibble(TF = tf, p_val = NA, mean_score_DAN = NA, mean_score_Other = NA, delta = NA)
+    }
+  }
+) %>%
+  filter(!is.na(p_val)) %>%
+  mutate(p_adj = p.adjust(p_val, method = "BH")) %>%
+  filter(p_adj < 0.05, delta > 0) %>%
+  arrange(p_adj)
+
+write.csv(dan_tf_stats, "cluster_TF_activity_summary_DANs.csv")
+```
