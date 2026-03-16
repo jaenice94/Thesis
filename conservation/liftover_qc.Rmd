@@ -1,0 +1,182 @@
+---
+title: "Peak_width_distribution_liftover"
+output: html_notebook
+---
+
+ Janis
+
+```{r}
+library(ggplot2)
+library(dplyr)
+library(readr)
+
+# === Define paths ===
+hg38_dir <- "cuttag_dir/peak_calling"
+lifted_dir <- "cuttag_dir/reciprocal_liftover/"
+setwd("cuttag_dir/reciprocal_liftover/")
+
+# === Cell types to include ===
+cell_types <- c("FOXA2", "OLIG2", "NEUN")
+
+# === Function to read BED and compute widths ===
+process_bed <- function(file_path, cell_type, species) {
+  bed <- read_tsv(file_path, col_names = FALSE, col_types = cols(.default = "c"))
+  
+  # Ensure minimum required columns
+  if (ncol(bed) < 4) {
+    warning(paste("Skipping file due to insufficient columns:", file_path))
+    return(NULL)
+  }
+  
+  bed <- bed %>%
+  filter(!grepl("chrX|chrY|random", X1, ignore.case = TRUE)) %>%
+  mutate(
+    Chr = X1,
+    Start = as.numeric(X2),
+    End = as.numeric(X3),
+    Peak_ID = X4,
+    Peak_Width = End - Start,
+    Sample = paste0(cell_type, "_", species),
+    Cell_Type = cell_type,
+    Species = species
+  )
+
+  
+  return(bed[, c("Chr", "Start", "End", "Peak_ID", "Sample", "Cell_Type", "Species", "Peak_Width")])
+}
+
+# === Read all peaks ===
+all_peak_data <- bind_rows(lapply(cell_types, function(ct) {
+  hg38_file <- file.path(hg38_dir, paste0(ct, "_confidence_peaks.sorted.bed"))
+  hg19_file <- file.path(lifted_dir, paste0(ct, "_final_human_peaks_noXYrandom.bed"))
+  
+  bind_rows(
+    process_bed(hg38_file, ct, "hg38"),
+    process_bed(hg19_file, ct, "hg19_lifted")
+  )
+}))
+
+# === Format and transform ===
+all_peak_data <- all_peak_data %>%
+  filter(!is.na(Peak_Width) & Peak_Width > 0) %>%
+  mutate(
+    log10_Peak_Width = log10(Peak_Width),
+    Sample = factor(Sample, levels = unique(Sample))
+  )
+
+
+# === Cell type colors ===
+cell_type_colors <- c("NEUN" = "#009E73", "FOXA2" = "#785594", "OLIG2" = "#0072B2")
+
+```
+
+# === Plot ===
+pdf("Lifted_vs_hg38_Peak_Width_Boxplot_log10.pdf", width = 5, height = 3)
+
+ggplot(all_peak_data, aes(x = Sample, y = log10_Peak_Width, fill = Cell_Type)) +
+  geom_boxplot(outlier.shape = NA, alpha = 0.8) +
+  scale_fill_manual(values = cell_type_colors) +
+  labs(
+    title = "Log10 Peak Widths: Original hg38 vs Lifted hg19 Peaks",
+    x = "Sample (Cell type + Species)",
+    y = "log10(Peak Width) (bp)"
+  ) +
+  coord_flip() +  # 🔄 Flip axes
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        strip.text = element_text(face = "bold")) 
+
+
+dev.off()
+
+```{r}
+library(dplyr)
+library(ggplot2)
+
+# Subset hg38 and hg19 peaks separately
+hg38_peaks <- all_peak_data %>% filter(Species == "hg38")
+hg19_peaks <- all_peak_data %>% filter(Species == "hg19_lifted")
+
+# Join by Peak_ID and Cell_Type to ensure alignment
+matched_peaks <- inner_join(hg38_peaks, hg19_peaks, 
+                            by = c("Peak_ID", "Cell_Type"), 
+                            suffix = c("_hg38", "_hg19"))
+
+# Optionally log10-transform widths
+matched_peaks <- matched_peaks %>%
+  mutate(
+    log10_hg38 = log10(Peak_Width_hg38),
+    log10_hg19 = log10(Peak_Width_hg19)
+  )
+
+# One model per cell type
+lm_results <- matched_peaks %>%
+  group_by(Cell_Type) %>%
+  do({
+    model <- lm(log10_hg19 ~ log10_hg38, data = .)
+    data.frame(
+      R2 = summary(model)$r.squared
+    )
+})
+
+print(lm_results)
+
+
+library(ggplot2)
+library(ggpmisc)  # for stat_poly_eq
+
+p <- ggplot(matched_peaks, aes(x = log10_hg38, y = log10_hg19, color = Cell_Type)) +
+  geom_point(alpha = 0.4, size = 1) +
+  geom_smooth(method = "lm", se = FALSE, color = "black") +
+  facet_wrap(~Cell_Type) +
+  stat_poly_eq(
+    aes(label = paste(..eq.label.., ..rr.label.., sep = "~~~")),
+    formula = y ~ x,
+    parse = TRUE,
+    label.x = "left",
+    label.y = "top",
+    size = 5,
+    color = "black"
+  ) +
+  labs(
+    title = "Correlation of Peak Widths (Hg38 vs Lifted Hg19)",
+    x = "log10(Peak Width) - hg38",
+    y = "log10(Peak Width) - Lifted hg19"
+  ) +
+  scale_color_manual(values = cell_type_colors) +
+  theme_minimal()
+
+ggsave("peak_correlation_hg19_lift_hg38.png", p, width = 15, height = 5, dpi = 300)
+
+
+```
+
+```{r}
+# === Count peaks per sample ===
+peak_counts <- all_peak_data %>%
+  group_by(Cell_Type, Species) %>%
+  summarize(Total_Peaks = n(), .groups = "drop") %>%
+  mutate(Sample = paste0(Cell_Type, "_", Species))
+
+# Reorder for consistent x-axis
+peak_counts$Sample <- factor(peak_counts$Sample, levels = unique(peak_counts$Sample))
+
+pdf("Lifted_vs_hg38_Peak_numbers_Bars.pdf", width = 5, height = 3)
+ggplot(peak_counts, aes(x = Sample, y = Total_Peaks, fill = Cell_Type)) +
+  geom_bar(stat = "identity", width = 0.7) +
+  scale_fill_manual(values = cell_type_colors) +
+  labs(
+    title = "Number of Peaks: hg38 vs Lifted hg19",
+    x = "Sample (Cell type + Species)",
+    y = "Total Number of Peaks"
+  ) +
+  theme_minimal(base_size = 13) +
+  coord_flip() +  # 🔄 Flip axes
+  theme(
+    legend.position = "right",
+    axis.text.y = element_text(hjust = 1)
+  )
+dev.off()
+
+
+```
