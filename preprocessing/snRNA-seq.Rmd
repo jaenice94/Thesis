@@ -1,0 +1,370 @@
+---
+title: "Processing snRNA-seq data"
+output: html_notebook
+---
+
+STEP1:preprocess dataset and integrate samples
+
+#this takes long - better to submit as R script
+```{r}
+# Load libraries
+library(Seurat)
+library(patchwork)
+library(future)
+
+options(future.globals.maxSize = 15000 * 1024^2)  # 15GB
+
+# Create list of sample names, paths, and metadata
+samples <- list(
+  CR061_FOXA2 = "/home/snRNA_seq/cellranger_output/IGF135302/outs/raw_feature_bc_matrix/",
+  CR061_NEUN  = "/home/snRNA_seq/cellranger_output/IGF135303/outs/raw_feature_bc_matrix/",
+  CR062_FOXA2 = "/home/snRNA_seq/cellranger_output/IGF135304/outs/raw_feature_bc_matrix/",
+  CR062_NEUN  = "/home/snRNA_seq/cellranger_output/IGF135305/outs/raw_feature_bc_matrix/"
+)
+
+# Create Seurat objects per sample and annotate
+seurat.list <- lapply(names(samples), function(sample_name) {
+  dat <- Read10X(data.dir = samples[[sample_name]])
+  obj <- CreateSeuratObject(counts = dat, project = sample_name, min.cells = 3, min.features = 200)
+  obj$sample <- sample_name
+  obj$group <- ifelse(grepl("FOXA2", sample_name), "FOXA2+", "FOXA2-")
+  obj$replicate <- ifelse(grepl("CR061", sample_name), "CR061", "CR062")
+  obj[["percent.mt"]] <- PercentageFeatureSet(obj, pattern = "^mt-")
+  return(obj)
+})
+names(seurat.list) <- names(samples)
+
+VlnPlot(seurat.list[["CR061_FOXA2"]], features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3)
+
+
+# Apply QC, normalization, feature selection per sample
+seurat.list <- lapply(seurat.list, function(obj) {
+  #neurons might be relatively complex - 3500 as upper cut-off
+  obj <- subset(obj, subset = nFeature_RNA > 500 & nFeature_RNA < 3500 & percent.mt < 5)
+  return(obj)
+})
+
+data.big <- merge(seurat.list$CR061_FOXA2, y = c(seurat.list$CR061_NEUN, seurat.list$CR062_FOXA2, seurat.list$CR062_NEUN), add.cell.ids = c("CR061_FOXA2", "CR061_NEUN", "CR062_FOXA2","CR062_NEUN"), project = "mouse_midbrain")
+
+data.big <- NormalizeData(data.big)
+
+data.big <- FindVariableFeatures(data.big, selection.method = "vst", nfeatures = 2000)
+data.big <- ScaleData(data.big)
+data.big <- RunPCA(data.big, npcs = 30)
+
+combined_data <- IntegrateLayers(object = data.big, method = RPCAIntegration, orig.reduction = "pca", new.reduction = "integrated.rpca",
+                                 verbose = FALSE)
+
+#in home directory
+saveRDS(combined_data, file = "combined_seurat.rds")
+
+```
+
+```{r}
+combined_data <- readRDS("combined_seurat.rds")
+
+#join layers after integration
+combined_data[["RNA"]] <- JoinLayers(combined_data[["RNA"]])
+
+ElbowPlot(combined_data)
+
+combined_data <- FindNeighbors(combined_data, reduction = "integrated.rpca", dims = 1:10)
+
+combined_data <- RunUMAP(combined_data, dims = 1:10, reduction = "integrated.rpca")
+
+# Add group column to merged Seurat object
+combined_data$group <- ifelse(grepl("FOXA2", combined_data$sample), "FOXA2+", "FOXA2-")
+
+combined_data <- FindClusters(combined_data, resolution = 0.4)
+
+pdf("UMAP_combined_samples.pdf", width = 20)
+DimPlot(combined_data, reduction = "umap", group.by = c("group", "seurat_clusters"))
+dev.off()
+
+DimPlot(combined_data, reduction = "umap", group.by = c("group", "seurat_clusters"))
+
+```
+```{r}
+DimPlot(combined_data, reduction = "umap", split.by = "group")
+```
+
+```{r}
+FeaturePlot(combined_data , features = c("Th", "Slc6a3", "Slc18a2"))
+
+DotPlot(combined_data, features = c("Th", "Slc6a3", "Ddc", "Nr4a2", "Foxa2", "Pitx3", "Foxa1", "Slc18a2"), group.by = "seurat_clusters") + RotatedAxis()
+```
+
+
+
+```{r}
+# Assign dopaminergic label
+combined_data$DA_identity <- ifelse(combined_data$seurat_clusters == "4", "DA", "non-DA")
+
+# Check counts
+table(combined_data$DA_identity)
+table(combined_data$sample)
+table(combined_data$group)
+table(combined_data$DA_identity)
+```
+```{r}
+# Raw counts of DA vs non-DA per sample
+table(combined_data$DA_identity, combined_data$group)
+
+# Proportions (within each sample)
+prop.table(table(combined_data$DA_identity, combined_data$group), margin = 2)
+```
+neuronal subtype markers
+```{r}
+marker_genes <- c(
+  # Dopaminergic
+  "Th", "Ddc", "Slc6a3", "Slc18a2", "Calb1",
+  # GABAergic
+  "Gad1", "Gad2", "Slc32a1",
+  # Glutamatergic
+  "Slc17a6", "Slc17a7", "Slc17a8",
+  # Cholinergic
+  "Chat", "Slc5a7", "Ache",
+  # Serotonergic
+  "Tph2", "Slc6a4",
+  # Noradrenergic
+  "Dbh", "Slc6a2",
+  # Histaminergic
+  "Hdc",
+  # Neuropeptidergic
+  "Tac1", "Npy", "Pdyn", "Crh", "Vip", "Sst", 
+  
+  "Satb2"
+)
+
+pdf("neuronal_marker_combined_data.pdf", width = 20)
+DotPlot(combined_data, features = marker_genes, group.by = "seurat_clusters") +
+  RotatedAxis() 
+dev.off()
+
+DotPlot(combined_data, features = marker_genes, group.by = "seurat_clusters") +
+  RotatedAxis() 
+```
+
+```{r}
+setwd("snRNA_seq/cellranger_output/merged_data/")
+
+saveRDS(combined_data, file = "integrated_data.rds")
+
+```
+
+
+
+STEP2: Assigning cluster labels based on Saunders et al 
+
+
+```{r}
+
+sc <- readRDS( file = "/home/snRNA_seq/cellranger_output/merged_data/integrated_data.rds")
+
+DimPlot(sc , reduction = "umap")
+```
+
+```{r}
+DimPlot(sc, reduction = "umap", group.by = "group", pt.size = 0.3) 
+```
+
+#Using Saunders 2019 to transfer clusters
+```{r}
+library(DropSeq.util)
+library(SingleCellExperiment)
+dge <- loadSparseDge("/home/public_data/single_cell_mouse/Saunders_2019/F_GRCm38.81.P60SubstantiaNigra.raw.dge.txt.gz")
+
+sce <- SingleCellExperiment(
+    assays = list(counts = dge)  # Add raw counts
+)
+
+cluster_outcomes<-readRDS("/home/public_data/single_cell_mouse/Saunders_2019_170325/F_GRCm38.81.P60SubstantiaNigra.cell_cluster_outcomes.RDS")
+
+annotations <- readRDS("/home/public_data/single_cell_mouse/Saunders_2019/annotation.BrainCellAtlas_Saunders_version_2018.04.01.RDS")
+
+colData(sce)$reason <- cluster_outcomes$reason
+
+cells_to_remove <- rownames(cluster_outcomes[!(is.na(cluster_outcomes$reason) | 
+                                               cluster_outcomes$reason == "curation"), ])
+
+cluster_outcomes_filtered <- cluster_outcomes[!(rownames(cluster_outcomes) %in% cells_to_remove), ]
+
+# Create a logical vector where reason is either "curation" or NA
+valid_cells <- is.na(colData(sce)$reason) | colData(sce)$reason == "curation"
+
+# Check how many cells will be removed
+cat("Removing", sum(!valid_cells), "cells where reason is NOT 'curation' or NA.\n")
+
+sce_valid <- sce[, valid_cells]
+
+#need to drop levels that we removed
+cluster_outcomes_filtered$subcluster <- droplevels(cluster_outcomes_filtered$subcluster)
+colData(sce_valid)$subcluster <- cluster_outcomes_filtered$subcluster
+
+#need to drop levels that we removed
+cluster_outcomes_filtered$cluster <- droplevels(cluster_outcomes_filtered$cluster)
+colData(sce_valid)$cluster <- cluster_outcomes_filtered$cluster 
+
+seurat_obj <- as.Seurat(sce_valid)
+
+reference <- as.Seurat(sce_valid, counts = "counts", data = NULL)
+reference <- NormalizeData(reference)
+reference <- FindVariableFeatures(reference, selection.method = "vst", nfeatures = 2000)
+reference <- ScaleData(reference)
+reference <- RunPCA(reference, features = VariableFeatures(object = reference), npcs = 20)
+ElbowPlot(reference)
+head(reference)
+```
+
+```{r}
+reference <- RunUMAP(reference, dims = 1:10)
+
+Idents(reference) <- reference@meta.data[["cluster"]] 
+
+DimPlot(reference , reduction = "umap") #missing actual cluster labels
+
+```
+
+```{r}
+FeaturePlot(reference, features = c("Th", "Slc6a3", "Slc18a2", "Ddc", "Drd2")) #cluster 4 is DA neurons 
+```
+
+
+```{r}
+library (dplyr)
+
+# Load Cell Type Data (CTD)
+load("~/public_data/ctd/F_GRCm38.81.P60SubstantiaNigra_Saunders_2019.rda")
+
+# Load Annotations
+annotations <- readRDS("/home/public_data/single_cell_mouse/Saunders_2019/annotation.BrainCellAtlas_Saunders_version_2018.04.01.RDS")
+
+# Filter annotations for SN tissue
+annotations_filtered <- annotations[grepl("SN", annotations$tissue), ]
+
+# Replace "-" with "_" in subcluster names
+annotations_filtered$subcluster <- gsub("-", "_", annotations_filtered$subcluster)
+
+# Extract first number (prefix) from subcluster
+annotations_filtered$prefix <- sub("^([0-9]+).*", "\\1", annotations_filtered$subcluster)
+
+# Create new cluster_name column
+annotations_filtered$cluster_name <- paste(annotations_filtered$prefix, annotations_filtered$class, annotations_filtered$class_marker,  sep="_")
+
+# Count occurrences of each cluster_name within each prefix
+annotations_filtered <- annotations_filtered %>%
+  group_by(prefix, cluster_name) %>%
+  summarise(count = n(), .groups = "drop") %>%  # Count occurrences
+  arrange(prefix, desc(count))  # Sort by prefix and frequency (most common first)
+
+# Merge sorted cluster names per prefix
+merged_clusters <- annotations_filtered %>%
+  group_by(prefix) %>%
+  summarise(merged_cluster_name = paste(cluster_name, collapse = "/"), .groups = "drop")
+
+# Join back with the original dataset
+annotations_filtered <- left_join(annotations_filtered, merged_clusters, by = "prefix")
+
+annotations_final <-  annotations_filtered[, c("prefix", "merged_cluster_name")]
+
+annotations_final <- unique(annotations_final)
+
+# Now match based on 'prefix'
+reference$merged_cluster_name <- annotations_final$merged_cluster_name[
+  match(reference$cluster, annotations_final$prefix)
+]
+
+
+Idents(reference) <- reference@meta.data[["merged_cluster_name"]] #4 is Th+
+
+pdf("Saunders_UMAP.pdf", width = 20)
+DimPlot(reference , reduction = "umap")
+dev.off()
+```
+
+
+```{r}
+# Find transfer anchors between the query and reference datasets
+
+# reference dataset already has cluster or cell type annotations
+
+query <- sc
+anchors <- FindTransferAnchors(reference = reference, 
+                               query = query, 
+                               dims = 1:20)  # Adjust dims based on your PCA analysis
+
+predictions <- TransferData(anchorset = anchors, 
+                      refdata = reference$merged_cluster_name,  # Adjust 'celltype' to the correct metadata column
+                      dims = 1:20)  # Adjust dims based on your PCA analysis
+
+query <- AddMetaData(query, metadata = predictions)
+Idents(query) <- query$predicted.id
+
+pdf("Saunders_transferred_labels.pdf", width=20)
+DimPlot(query, reduction = "umap")
+dev.off()
+
+```
+
+```{r}
+p1 <- DimPlot(sc, reduction = "umap")
+p2 <- DimPlot(query, reduction = "umap")
+
+pdf("annotations.pdf", width = 20)
+p1 + p2 + plot_layout(ncol = 2)
+dev.off()
+```
+
+
+
+```{r}
+table(query$predicted.id)  # raw counts
+
+prop.table(table(query$predicted.id))  # proportions
+
+```
+
+
+```{r}
+library(ggplot2)
+
+# Create a dataframe of predicted cluster per sample and group
+prop_df <- query@meta.data %>%
+  group_by(group, sample = orig.ident, predicted.id) %>%
+  summarise(n = n(), .groups = "drop") %>%
+  group_by(group, sample) %>%
+  mutate(proportion = n / sum(n))
+
+# Filter for FOXA2+ only
+prop_FOXA2 <- filter(prop_df, group == "FOXA2+")
+
+```
+
+```{r}
+library(ggplot2)
+
+# Create a dataframe of predicted cluster per sample and group
+prop_df <- sc@meta.data %>%
+  group_by(group, sample = orig.ident, celltype_annotation) %>%
+  summarise(n = n(), .groups = "drop") %>%
+  group_by(group, sample) %>%
+  mutate(proportion = n / sum(n))
+
+# Filter for FOXA2+ only
+prop_FOXA2 <- filter(prop_df, group == "FOXA2+")
+
+pdf("proportions_bars_my_annotations.pdf", width = 8, height = 6)
+
+ggplot(prop_df, aes(x = celltype_annotation, y = proportion, color = group, fill = group)) +
+  stat_summary(fun = mean, geom = "bar", position = position_dodge(width = 0.8), width = 0.7, linewidth = 0.2) +  # Mean bar
+  geom_jitter(position = position_jitterdodge(jitter.width = 0.2, dodge.width = 0.8), size = 1.5, alpha = 0.8) +  # Sample dots
+  theme_minimal() +
+  coord_flip() +
+  labs(title = "Cell Type Proportions per Sample", x = "Annotated Cell Type", y = "Proportion of Cells") +
+  scale_fill_manual(values = c("FOXA2+" = "#B8A5C5", "FOXA2-" = "#7CCAB5"))  +
+  scale_color_manual(values = c("FOXA2+" = "black", "FOXA2-" = "black"))
+
+
+dev.off()
+
+```
