@@ -1,0 +1,289 @@
+---
+title: "Volpato CAMERA"
+output: html_notebook
+---
+
+
+1. Processing cell type markers into GMT
+#same for 10p / Level2 markers
+```{r}
+library(dplyr)
+setwd("/home/public_data/single_cell_human/Volpato_2025/defined_markers_Volpato/")
+Level1_5p <- read.csv("/home/public_data/single_cell_human/Volpato_2025/defined_markers_Volpato/Volpato_Level1_5p_marker.csv")
+
+levels <- unique(Level1_5p$celltype)
+
+markers <- Level1_5p 
+
+gmt_lines <- markers %>%
+  group_by(celltype) %>%
+  summarise(
+    description = "Volpato2025_Level1_5p",
+    genes = paste(genes, collapse = "\t"),
+    .groups = "drop"
+  ) %>%
+  mutate(gmt_line = paste(celltype, description, genes, sep = "\t"))
+
+writeLines(gmt_lines$gmt_line, "Volpato2025_Level1_5p.gmt")
+```
+
+2. Run CAMERA
+
+```{r}
+# Load required libraries
+library(edgeR)
+library(dplyr)
+library(DESeq2)
+library(GenomicRanges)
+library(org.Hs.eg.db)
+library(ChIPseeker)
+library(TxDb.Hsapiens.UCSC.hg38.knownGene)
+library(pheatmap)
+library(ggplot2)
+library(viridis)
+
+setwd("/home/public_data/single_cell_human/Volpato_2025/marker_Viola/")
+```
+
+#read in counts + set up differential analysis matrix
+```{r}
+
+library(limma)
+library(edgeR)
+
+counts <- read.table("cuttag_dir/featurecounts/All_samples_counts.txt", header = TRUE)
+
+colnames(counts) <- gsub(".*{sample_prefix}.|.dedup.q30.no_blacklist.bam", "", colnames(counts))
+
+peak_coord<-counts[,1:4]
+
+peak_coord_gr<-GRanges(seqnames = peak_coord$Chr, ranges = IRanges(start = peak_coord$Start, end = peak_coord$End), GeneID=peak_coord$Geneid)
+
+gene_peak_coord<-annotatePeak(peak = peak_coord_gr, tssRegion = c(-2000,500), TxDb = TxDb.Hsapiens.UCSC.hg38.knownGene, annoDb = "org.Hs.eg.db")
+gene_peak_coord<-as.data.frame(gene_peak_coord@anno)
+gene_peak_coord<- gene_peak_coord[grepl(pattern = "Promoter", x = gene_peak_coord$annotation), ]
+gene_peak_coord<-gene_peak_coord[,c(6,17)]
+```
+#create differential 
+```{r}
+
+rownames(counts) <- counts$Geneid 
+counts_data <- counts[-c(1:6)]
+
+sample_metadata <- read.delim("cuttag_dir/sample_metadata.tsv", sep="\t")
+
+#create differential list
+d <- DGEList(counts = counts_data)
+
+#filter low read peaks out based on cpm normalised results
+keep <- rowSums(cpm(d) > 1) >= 2
+d <- d[keep,]
+
+#Account for library composition - per sample normalisation
+d <- calcNormFactors(d, method = "TMM")
+
+#create design matrix based on metadata - accounting for donor 
+sample_metadata <- sample_metadata[match(colnames(counts_data), sample_metadata$Sample), ]
+design <- model.matrix(~ 0 + Cell_Type + Donor, data = sample_metadata)
+
+d<-estimateDisp(d, design, robust = TRUE)
+d$common.dispersion
+
+# Scale counts to CPM (counts per million) using TMM-normalized library sizes
+scaled_counts <- cpm(d, normalized.lib.sizes = TRUE)
+
+
+
+#fit the model
+fit <-glmQLFit(y = d, design = design, robust = TRUE)
+
+logCPM <- cpm(d, log = TRUE, prior.count = 1)
+
+#Define contrasts
+
+my.contrast <- makeContrasts(
+  FOXA2_vs_others = Cell_TypeFOXA2 - (Cell_TypeNEUN + Cell_TypeOLIG2)/2, 
+  NEUN_vs_others = Cell_TypeNEUN - (Cell_TypeFOXA2 + Cell_TypeOLIG2)/2,
+  OLIG2_vs_others = Cell_TypeOLIG2 - (Cell_TypeFOXA2 + Cell_TypeNEUN)/2,
+  levels = design
+)
+
+```
+
+#Add peak info to the counts
+```{r}
+#Add the gene annotations to the counts
+logCPM_genes<-merge(x = logCPM, y = gene_peak_coord, by.x="row.names", by.y="GeneID")
+
+#subset counts and SYMBOL
+subset_counts <- logCPM_genes %>%
+  dplyr::select(2:13, SYMBOL)
+
+#aggregate counts per symbol
+subset_counts <- subset_counts %>%
+  group_by(SYMBOL) %>%
+  summarize(across(everything(), sum, na.rm = TRUE))
+
+subset_counts<-as.data.frame(subset_counts)
+subset_counts<-na.omit(subset_counts)
+
+rownames(subset_counts) <- subset_counts$SYMBOL
+
+#remove symbol column
+subset_counts<-subset_counts[,-1]
+```
+
+#Read in Cell type marker genes 
+
+```{r}
+library(ActivePathways)
+library(fgsea)
+library(dplyr)
+
+gmt_file_markers <- "/rds/general/user/jlt121/home/public_data/single_cell_human/Volpato_2025/marker_Viola/Volpato2025_Level2_5p.gmt"
+
+g_marker <- read.GMT(gmt_file_markers)
+
+#confirm that it is a GMT file - should be true - before starting 
+is.GMT(g_marker)
+
+#read in the subsetted pathways for the analysis ready to be used by fgsea
+gene_set <- gmtPathways(gmt_file_markers)
+
+#check if this makes sense before continuing 
+gene_set %>% 
+  head() %>% 
+  lapply(head)
+
+```
+
+Running CAMERA
+
+```{r}
+library(limma)
+
+# Perform CAMERA analysis
+camera_FOXA2 <- camera(y = subset_counts,
+                 index = gene_set,
+                 design = design,
+                 contrast = my.contrast[, "FOXA2_vs_others"])
+
+```
+
+```{r}
+# Perform CAMERA analysis
+camera_NEUN <- camera(y = subset_counts,
+                 index = gene_set,
+                 design = design,
+                 contrast = my.contrast[, "NEUN_vs_others"])
+
+```
+
+```{r}
+# Perform CAMERA analysis
+camera_OLIG2 <- camera(y = subset_counts,
+                 index = gene_set,
+                 design = design,
+                 contrast = my.contrast[, "OLIG2_vs_others"])
+
+```
+
+
+#Plot results
+
+```{r}
+library(ggplot2)
+library(tidyr)
+
+# Calculate the log-transformed FDR values and adjust for direction
+camera_FOXA2$logFDR_FOXA2 <- -log10(camera_FOXA2$FDR)
+camera_FOXA2$logFDR_FOXA2 <- ifelse(camera_FOXA2$Direction == "Down", -camera_FOXA2$logFDR_FOXA2, camera_FOXA2$logFDR_FOXA2)
+camera_FOXA2$CellType <- "FOXA2"
+
+cluster_order <- rownames(camera_FOXA2)
+
+camera_NEUN$logFDR_NEUN <- -log10(camera_NEUN$FDR)
+camera_NEUN$logFDR_NEUN <- ifelse(camera_NEUN$Direction == "Down", -camera_NEUN$logFDR_NEUN, camera_NEUN$logFDR_NEUN)
+camera_NEUN$CellType <- "NEUN"
+
+# Find the corresponding indices in cluster_order
+indices <- match(rownames(camera_NEUN), cluster_order)
+
+# Reorder camera_NEUN
+camera_NEUN <- camera_NEUN[order(indices), ]
+
+camera_OLIG2$logFDR_OLIG2 <- -log10(camera_OLIG2$FDR)
+camera_OLIG2$logFDR_OLIG2 <- ifelse(camera_OLIG2$Direction == "Down", -camera_OLIG2$logFDR_OLIG2, camera_OLIG2$logFDR_OLIG2)
+camera_OLIG2$CellType <- "OLIG2"
+
+# Find the corresponding indices in cluster_order
+indices <- match(rownames(camera_OLIG2), cluster_order)
+
+# Reorder camera_result
+camera_OLIG2 <- camera_OLIG2[order(indices), ]
+
+# Combine the significance stars into a matrix
+combined_camera <- matrix(nrow = length(cluster_order), ncol = 3)
+rownames(combined_camera) <- cluster_order #add rownames
+colnames(combined_camera) <- c("FOXA2", "NEUN", "OLIG2")  # Assign column names
+combined_camera[, 1] <- camera_FOXA2$logFDR_FOXA2
+combined_camera[, 2] <- camera_NEUN$logFDR_NEUN 
+combined_camera[, 3] <- camera_OLIG2$logFDR_OLIG2
+
+
+library(pheatmap)
+
+# Set up a matrix for pheatmap: rows = clusters, columns = cell types
+heatmap_matrix <- as.matrix(combined_camera)
+
+# Create annotation for significance stars
+get_significance_stars <- function(fdr) {
+  if (fdr < 0.001) return("***")
+  else if (fdr < 0.01) return("**")
+  else if (fdr < 0.05) return("*")
+  else return("")
+}
+
+# Apply this to each camera result
+stars_matrix <- matrix("", nrow = nrow(heatmap_matrix), ncol = ncol(heatmap_matrix))
+rownames(stars_matrix) <- rownames(heatmap_matrix)
+colnames(stars_matrix) <- colnames(heatmap_matrix)
+
+stars_matrix[, "FOXA2"] <- sapply(camera_FOXA2$FDR, get_significance_stars)
+stars_matrix[, "NEUN"] <- sapply(camera_NEUN$FDR, get_significance_stars)
+stars_matrix[, "OLIG2"] <- sapply(camera_OLIG2$FDR, get_significance_stars)
+
+# Define a color palette: blue = down, white = 0, red = up
+breaksList <- seq(-max(abs(heatmap_matrix)), max(abs(heatmap_matrix)), by = 0.1)
+colors <- colorRampPalette(c("#00876C", "white","#785594"))(length(breaksList))
+
+
+cell=c("FOXA2",  "NEUN", "OLIG2")
+
+annotation_col<-data.frame(CellType=colnames(combined_camera))
+rownames(annotation_col)<-annotation_col$CellType
+#colors <- c("#785594", "#B8A5C5", "#009E73","#7CCAB5", "#0072B2", "#7CB4D4")
+
+annotation_color<-list(CellType=c("FOXA2" = "#785594", "NEUN" = "#009E73","OLIG2" = "#0072B2"))
+
+pdf("CAMERA_Volpato_Level2_5p.pdf")
+# Plot heatmap
+pheatmap(
+  heatmap_matrix,
+  cluster_rows = FALSE,
+  cluster_cols = FALSE,
+  show_colnames = F,
+  annotation_col = annotation_col,
+  annotation_colors = annotation_color,
+  color = colors,
+  breaks = breaksList,
+  display_numbers = stars_matrix, # overlay stars
+  number_color = "black",
+  main = "CAMERA enrichment (signed log10 FDR) with significance",
+  angle_col = 90, 
+  fontsize_number = 12,
+  fontsize = 7, cellwidth = 30, cellheight = 30, height = 5, width = 9
+)
+dev.off()
+
+```
