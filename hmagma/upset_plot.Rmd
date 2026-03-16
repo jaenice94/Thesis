@@ -1,0 +1,111 @@
+---
+title: "Upset_evidence_support"
+output: html_notebook
+---
+
+Janis
+
+Upset plot showing evidence for all genes, then coloring them respectively by Cell type / specificity etc. 
+
+
+https://krassowski.github.io/complex-upset/articles/Examples_R.html
+
+
+Upset Plot to show overlap with any of these categories
+```{r}
+binary_F <- read.csv("Evidence_All_FOXA2_HMAGMA_0.001_binary_scores.csv")
+binary_O <- read.csv("Evidence_All_OLIG2_HMAGMA_0.001_binary_scores.csv")
+binary_N <- read.csv("Evidence_All_NEUN_HMAGMA_0.001_binary_scores.csv")
+
+binary_O$CellType <- "OLIG2"
+binary_F$CellType   <- "FOXA2"
+binary_N$CellType  <- "NEUN"
+
+combined_support <- bind_rows(binary_O, binary_N, binary_F)
+
+# Keep only key columns
+long_support <- combined_support %>%
+  select(GENE, SYMBOL, DEG_support:Druggability_support, CellType)
+
+
+# Combine support scores per gene across cell types
+support_combined <- long_support %>%
+  group_by(GENE, SYMBOL) %>%
+  summarise(across(DEG_support:Druggability_support, ~ as.integer(any(. == 1))), .groups = "drop")
+
+
+gene_overlap <- long_support %>%
+  group_by(GENE) %>%
+  summarise(CellType_Overlap = paste(sort(unique(CellType)), collapse = "+"))
+
+combined_collapsed <- support_combined %>%
+  left_join(gene_overlap, by = "GENE") %>%
+  mutate(CellType_Overlap = ifelse(is.na(CellType_Overlap), "None", CellType_Overlap))
+
+F <- combined_collapsed %>%
+  filter(CellType_Overlap == "FOXA2")
+
+
+
+
+library(dplyr)
+library(UpSetR)
+unique_genes <- f
+
+upset_data <-  combined_collapsed %>%
+  mutate(
+    DEG = DEG_support > 0,
+    QTL = QTL_support > 0,
+    MPRA = MPRA_support > 0, ,
+    fineMap = fineMap_support > 0,
+    Prioritisation_support = GWAS_support > 0,
+    OpenTarget_score = OpenTarget_support > 0,
+    druggability = Druggability_support > 0
+  ) %>%
+  select(GENE, DEG, QTL, MPRA, fineMap, OpenTarget_score, Prioritisation_support, druggability, CellType_Overlap)
+
+ct_colors <- c(
+  "FOXA2" = "#785594",
+  "OLIG2" = "#0072B2",
+  "NEUN" = "#009E73",
+  "FOXA2+OLIG2" = "#80b1d3",
+  "FOXA2+NEUN" = "#cfd0e9",
+  "NEUN+OLIG2" = "#adf7e0",
+  "FOXA2+NEUN+OLIG2" = "#b3de69"
+)
+
+pdf("Upset_plot_evidence_All.pdf", width = 13, height = 7)
+
+upset(
+  upset_data,
+  intersect = c("DEG", "QTL", "MPRA", "fineMap", "OpenTarget_score", "Prioritisation_support"),
+
+  annotations = list(
+    'Cell Type Overlap (%)' = (
+      ggplot(mapping = aes(fill = CellType_Overlap)) +
+        geom_bar(stat = 'count', position = 'fill') +
+        scale_y_continuous(labels = scales::percent_format()) +
+        scale_fill_manual(values = ct_colors) +
+        ylab("Cell Type Overlap") 
+    )
+  ),
+  
+  
+
+  set_sizes = upset_set_size(
+    geom = geom_bar(
+      aes(fill = CellType_Overlap, x = group),
+      width = 0.8
+    ),
+    position = "left"
+  )+
+scale_fill_manual(values = ct_colors),
+
+  guides = "collect",
+  width_ratio = 0.15
+)
+
+dev.off()
+
+
+```
