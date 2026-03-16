@@ -1,0 +1,204 @@
+---
+title: "LDSC_pairwise_model"
+output: html_notebook
+---
+
+Janis
+
+```{r}
+library(tidyverse)
+library(data.table)
+library(stringr)
+library(pheatmap)
+
+
+analysis_date <- "24.04.2025_all_cell_types"
+
+# Define directories and patterns
+her_path <- "/ldsc/heritability_final/"
+analysis_date <- "24.04.2025_all_cell_types"
+pattern <- paste0("_", analysis_date, "_.*_vs_.*_PAIRWISE\\.results$")
+files <- list.files(her_path, pattern = pattern, full.names = TRUE)
+
+pairwise_data <- purrr::map_dfr(files, function(file) {
+  df <- fread(file)
+  df <- df %>% filter(Category %in% c("L2_1", "L2_2"))
+
+  file_name <- basename(file)
+  
+  disease <- str_extract(file_name, paste0("^(.*?)_", analysis_date))
+  disease <- str_remove(disease, paste0("_", analysis_date, "$"))
+  
+  parts <- str_match(
+    file_name,
+    paste0(analysis_date, "_(.+?)_vs_(.+?)_PAIRWISE\\.results$")
+  )
+  
+  cell1 <- parts[2]
+  cell2 <- parts[3]
+  
+  df <- df %>%
+    mutate(
+      Disease = disease,
+      File = file_name,
+      Cell1 = ifelse(Category == "L2_1", cell1, cell2),
+      Cell2 = ifelse(Category == "L2_1", cell2, cell1),
+      Z = `Coefficient_z-score`,
+      Coefficient_p = pnorm(`Coefficient_z-score`, lower.tail = FALSE),
+      log10_Coefficient_p = round(-log10(Coefficient_p), 5),
+    ) %>%
+    select(Disease, Cell1, Cell2, log10_Coefficient_p, Z, Coefficient_p)
+  
+  return(df)
+})
+
+
+```
+
+```{r}
+# Add Bonferroni-corrected significance per disease
+pairwise_data <- pairwise_data %>%
+  group_by(Disease) %>%
+  mutate(
+    Coefficient_p = pnorm(-abs(Z)),  # two-sided p
+    Coefficient_p_BF = p.adjust(Coefficient_p, method = "bonferroni"),
+    Significance_star_FDR = ifelse(
+      Coefficient_p_BF < 0.001, "***",
+      ifelse(Coefficient_p_BF < 0.01, "**",
+      ifelse(Coefficient_p_BF < 0.05, "*", ""))
+    )
+  ) %>%
+  ungroup()
+
+# Set negative Z-scores to 0 for plotting
+pairwise_data$log10_Coefficient_p[pairwise_data$Z < 0] <- 0
+
+```
+
+```{r}
+
+make_pairwise_matrix <- function(df, value_col = "log10_Coefficient_p") {
+  mat <- df %>%
+    select(Cell1, Cell2, !!sym(value_col)) %>%
+    pivot_wider(names_from = Cell2, values_from = !!sym(value_col)) %>%
+    column_to_rownames("Cell1") %>%
+    as.matrix()
+
+  # Fill lower triangle symmetrically if needed
+  mat[lower.tri(mat)] <- t(mat)[lower.tri(mat)]
+  return(mat)
+}
+
+make_significance_matrix <- function(df) {
+  mat <- df %>%
+    select(Cell1, Cell2, Significance_star_FDR) %>%
+    pivot_wider(names_from = Cell2, values_from = Significance_star_FDR, values_fill = "") %>%
+    column_to_rownames("Cell1") %>%
+    as.matrix()
+
+  mat[lower.tri(mat)] <- t(mat)[lower.tri(mat)]
+  return(mat)
+}
+
+```
+
+```{r}
+
+PD_GP2 <- pairwise_data %>% filter(Disease == "PD_GP2")
+
+
+pd_gp2_matrix <- PD_GP2 %>%
+  select(Cell1, Cell2, log10_Coefficient_p) %>%
+  pivot_wider(names_from = Cell2, values_from = log10_Coefficient_p) %>%
+  column_to_rownames("Cell1") %>%
+  as.matrix()
+
+pd_gp2_stars <- PD_GP2 %>%
+  select(Cell1, Cell2, Significance_star_FDR) %>%
+  pivot_wider(names_from = Cell2, values_from = Significance_star_FDR, values_fill = "") %>%
+  column_to_rownames("Cell1") %>%
+  as.matrix()
+
+
+```
+
+
+```{r}
+
+out_dir <- (file.path("/ldsc/heatmaps_final/"))
+
+pdf(paste0(out_dir,"heatmap_24.04.2025_all_cell_types_pairwise_BF_significance.pdf"), width = 10, height = 10)
+
+
+# === Get unique and sorted cell types ===
+cell_order <- sort(unique(c(rownames(pd_gp2_matrix), colnames(pd_gp2_matrix))))
+
+# === Reorder rows and columns ===
+pd_gp2_matrix <- pd_gp2_matrix[cell_order, cell_order]
+pd_gp2_stars  <- pd_gp2_stars[cell_order, cell_order]
+
+#create the row annotations 
+
+row_labels <- rownames(pd_gp2_matrix)  # Cell types
+col_labels <- colnames(pd_gp2_matrix)  # Disease types
+
+cell_types2 <- c(colnames(pd_gp2_matrix))
+cell_types <- c(rownames(pd_gp2_matrix))
+
+# Define your exact row names (must match rownames(ldsc_matrix))
+row_labels <- rownames(pd_gp2_matrix)
+
+
+# Manually assign a color to each
+row_color_map <- c(
+  "FOXA2_final_human_peaks_noXYrandom.mm10tohg19" = "#B8A5C5",  # purple
+  "FOXA2_final_human_peaks_noXYrandom.hg38tohg19" = "#785594",  # dark purple
+  "OLIG2_final_human_peaks_noXYrandom.mm10tohg19" = "#7CB4D4",  # blue
+  "OLIG2_final_human_peaks_noXYrandom.hg38tohg19" = "#0072B2",  # dark blue
+  "NEUN_final_human_peaks_noXYrandom.mm10tohg19"  = "#7CCAB5",  # green
+  "NEUN_final_human_peaks_noXYrandom.hg38tohg19"  = "#009E73"   # dark green
+)
+
+# Create annotation data frames
+ann_row <- data.frame(Cell_type = row_labels)
+rownames(ann_row) <- row_labels
+
+ann_col <- data.frame(Cell_type = cell_order)
+rownames(ann_col) <- cell_order
+
+
+ann_colors <- list(Cell_type = row_color_map)
+
+gp_row = which(diff(as.numeric(factor(ann_row$Cell_type)))!=0)
+gp_col = which(diff(as.numeric(factor(ann_col$Cell_type)))!=0)
+
+custom_colors <- colorRampPalette(c("#FFFFFF","#CEDAA4", "#C1D189", "#96A28F", "#354E28"))(10)
+
+pheatmap(pd_gp2_matrix,
+         color = custom_colors,
+         cluster_rows = FALSE,
+         cluster_cols = FALSE,
+         breaks = seq(0, 10, length.out = 11),    # Cap max at 10
+         legend_breaks = seq(0, 10, 2),  
+         display_numbers = pd_gp2_stars,
+         number_color = "black",
+         fontsize_number = 16,
+         fontsize_row = 12,
+         fontsize_col = 12,
+         annotation_row = ann_row,
+         annotation_col = ann_col,
+         annotation_colors = ann_colors,
+         gaps_row = gp_row,
+         gaps_col = gp_col,
+         main = "-log10(Coefficient p) (Stars = BF. sig)",
+         border_color = "darkgrey",
+         show_rownames = F,
+         show_colnames = F,
+         cellwidth = 30,
+         cellheight = 30)
+
+dev.off()
+
+
+
+```
