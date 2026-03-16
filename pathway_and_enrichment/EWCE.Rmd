@@ -1,0 +1,267 @@
+---
+title: "EWCE Volpato 2025 dataset NEUN vs FOXA2"
+output: html_notebook
+---
+
+
+```{r}
+library(Seurat)
+library(SingleCellExperiment)
+library(EWCE)
+library(data.table)
+
+```
+
+1. generate CTD 
+
+```{r}
+load("/home/public_data/single_cell_human/Volpato_2025/sn_atlas_processed_Jan25.RData") 
+
+
+sce <- as.SingleCellExperiment(sn_atlas_processed)
+
+ctr_cells <- colnames(sce)[colData$Disease == "CTR"]
+
+# Step 2: Subset the SCE object to control cells only
+sce_ctr <- sce[, ctr_cells]
+
+expData2<- counts(sce_ctr)
+
+colData<-colData(sce_ctr)
+
+cluster_CellType<-colData$CellType
+cluster_CellSubType<-colData$CellSubType
+cluster_new_class <- colData$new_class
+cluster_clust.disease <- colData$clust.disease
+cluster_disease <- colData$Disease
+
+annotLevels<-list(cluster_CellType=cluster_CellType, cluster_CellSubType=cluster_CellSubType, cluster_new_class=cluster_new_class, cluster_clust.disease=cluster_clust.disease)
+
+#write to CTD file for EWCE
+fNames_ALLCELLS <- EWCE::generate_celltype_data(
+    exp = expData2,
+    annotLevels = annotLevels,
+    groupName = "Volpato_2025",
+    savePath = "/rds/general/user/jlt121/home/public_data/ctd/",
+    file_prefix = "sn_atlas_processed_controls_only"
+)
+
+#verify that all clusters look good
+
+```{r}
+load("/home/public_data/ctd/sn_atlas_processed_controls_only_Volpato_2025.rda")
+```
+
+
+```{r}
+
+plt_exp <- EWCE::plot_ctd(ctd = ctd,
+                        level = 1,
+                        genes = c("TH", "SLC18A2", "ANXA1", "SLC6A3", "OLIG2", "PITX3", "NR4A2"),
+                        metric = "mean_exp")
+```
+
+```{r}
+plt_spec <- EWCE::plot_ctd(ctd = ctd,
+                         level = 1,
+                         genes = c("TH", "SLC18A2", "ANXA1", "SLC6A3", "OLIG2", "PITX3", "NR4A2"),
+                         metric = "specificity")
+```
+
+```{r}
+plt_spec <- EWCE::plot_ctd(ctd = ctd,
+                         level = 2,
+                         genes = c("TH", "SLC18A2", "ANXA1", "SLC6A3", "OLIG2", "PITX3", "NR4A2"),
+                         metric = "specificity")
+```
+
+```{r}
+plt_spec <- EWCE::plot_ctd(ctd = ctd,
+                         level = 3,
+                         genes = c("TH", "SLC18A2", "ANXA1", "SLC6A3", "OLIG2", "PITX3", "NR4A2", "FOXA2", "FOXA1"),
+                         metric = "specificity")
+```
+
+```{r}
+
+plt_spec <- EWCE::plot_ctd(ctd = ctd,
+                         level = 4,
+                         genes = c("TH", "SLC18A2", "ANXA1", "SLC6A3", "OLIG2", "PITX3", "NR4A2", "AGTR1"),
+                         metric = "specificity")
+```
+
+
+2.Testing enrichment
+
+
+```{r}
+
+# Define the list of sample filenames
+sample_files <- c("FOXA2_vs_NEUN_annotated.csv")
+
+```
+
+
+```{r}
+
+setwd("cuttag_dir/DEG_FOXA2_vs_NEUN")
+
+
+# Define number of bootstrap repetitions
+reps <- 100000
+
+# Create an empty list to store results
+results_list <- list()
+
+# Loop through each sample file
+for (sample in sample_files) {
+  # Load DEG dataset
+  deg <- read.csv(paste0("/cuttag_dir/DEG_FOXA2_vs_NEUN/", sample))
+
+  # Filter for promoter-annotated genes
+  deg_filtered <- deg[grepl("promoter", tolower(deg$annotation)), ]
+
+  # Filter by FDR threshold
+  deg_filtered_fdr <- deg_filtered[deg_filtered$FDR <= 0.05, ]
+
+  # Filter for log fold change > 0
+  deg_filtered_logFC <- deg_filtered_fdr[deg_filtered_fdr$logFC > 0, ]
+
+  # Run EWCE Bootstrap Enrichment Test
+  full_results <- EWCE::bootstrap_enrichment_test(
+    sct_data = ctd,
+    sctSpecies = "human",
+    genelistSpecies = "human",
+    hits = unique(deg_filtered_logFC$SYMBOL),
+    reps = reps,
+    annotLevel = 1 #if subcell types needed - L2
+  )
+
+  # Extract results
+  results <- full_results$results
+
+  # Add significance labels
+  results$sig <- ifelse(results$q < 0.001, "***",
+                        ifelse(results$q < 0.01, "**",
+                               ifelse(results$q < 0.05, "*","")))
+
+  # Store results in the list
+  results_list[[sample]] <- results
+
+  # Save results to a file
+  write.csv(results, "EWCE_Volpato_2025_EWCE_fdr0.05prom_FOXA2_vs_NEUN_results_level1.csv", row.names = FALSE)
+
+  print(paste("Finished processing:", sample))
+}
+
+```
+
+```{r}
+library(dplyr)
+library(readr)
+library(purrr)
+
+FOXA2 <- read_csv("EWCE_Volpato_2025_EWCE_fdr0.05prom_FOXA2_vs_NEUN_results_level1.csv")
+
+NEUN <- read_csv("EWCE_Volpato_2025_EWCE_fdr0.05prom_NEUN_vs_FOXA2_results_level1.csv")
+
+files <- list(
+  deg_FOXA2_vs_others = "EWCE_Volpato_2025_EWCE_fdr0.05prom_FOXA2_vs_NEUN_results_level1.csv",
+  deg_NEUN_vs_others  = "EWCE_Volpato_2025_EWCE_fdr0.05prom_NEUN_vs_FOXA2_results_level1.csv"
+)
+
+# Function to read and rename columns
+read_and_rename <- function(file, tag) {
+  df <- read_csv(file, show_col_types = FALSE)
+  colnames(df)[colnames(df) != "CellType"] <- paste(tag, colnames(df)[colnames(df) != "CellType"], sep = "_")
+  return(df)
+}
+
+
+
+# Read and process each file
+data_list <- imap(files, ~read_and_rename(.x, .y))
+
+# Merge all data frames by "CellType"
+merged_df <- reduce(data_list, full_join, by = "CellType")
+
+```
+
+```{r}
+std <- merged_df[, c("CellType", "deg_FOXA2_vs_others_sd_from_mean", "deg_NEUN_vs_others_sd_from_mean")]
+
+pvalue <- merged_df[, c("CellType", "deg_FOXA2_vs_others_q", "deg_NEUN_vs_others_q")]
+
+library(dplyr)
+
+# Assuming your data frame is called `df`
+stars <- pvalue %>%
+  mutate(
+    deg_FOXA2_vs_others_q = case_when(
+      deg_FOXA2_vs_others_q < 0.001 ~ "***",
+      deg_FOXA2_vs_others_q < 0.01 ~ "**",
+      deg_FOXA2_vs_others_q < 0.05 ~ "*",
+      TRUE ~ ""
+    ),
+    deg_NEUN_vs_others_q = case_when(
+      deg_NEUN_vs_others_q < 0.001 ~ "***",
+      deg_NEUN_vs_others_q < 0.01 ~ "**",
+      deg_NEUN_vs_others_q < 0.05 ~ "*",
+      TRUE ~ ""
+    )
+  )
+
+
+std <- as.data.frame(std)
+rownames(std)<-std$CellType
+std<-std[,-1]
+
+stars <- as.data.frame(stars)
+rownames(stars)<-stars$CellType
+stars<-stars[,-1]
+
+```
+
+
+3. Visualising 
+```{r}
+
+
+color_palette <- colorRampPalette(colors = c("#FFFFFF", "#D0F0E0", "#A0E6C2", "#5AC8A4", "#117766"))(100)
+
+#color_palette <- colorRampPalette(colors = c("#FFFFFF","#C5E862","#6DC335", "#117733"))(1000)
+
+cell=c("deg_FOXA2_vs_others",  "deg_NEUN_vs_others")
+
+annotation_col<-data.frame(CellType=colnames(std))
+rownames(annotation_col)<-annotation_col$CellType
+
+annotation_color<-list(CellType=c("deg_FOXA2_vs_others_sd_from_mean" = "#785594", "deg_NEUN_vs_others_sd_from_mean" = "#009E73"))
+
+
+std[std < 0] <- 0
+
+# Filter out rows where all std values are 0
+
+# Make sure row and column names match `std`
+colnames(stars) <- colnames(std)
+
+library(pheatmap)
+
+pdf("cuttag_dir/DEG_FOXA2_vs_NEUN/EWCE_Volpato2025_level1_Ctrl_only_FOXA2_NEUN.pdf", height = 20, width = 10)
+pheatmap(mat = std, annotation_col = annotation_col, annotation_colors = annotation_color,
+         show_colnames = F,
+         color = color_palette, 
+         display_numbers = stars, 
+         cluster_rows = F, 
+         cluster_cols = F, 
+         treeheight_row = F, 
+         treeheight_col = F, 
+         angle_col = 90, 
+         fontsize_number = 12,
+         fontsize = 7, cellwidth = 30, cellheight = 30, height = 5, width = 9)
+
+dev.off()
+
+
+```
